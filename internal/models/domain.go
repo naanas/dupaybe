@@ -3,6 +3,14 @@ package models
 import "time"
 
 // --- CLIENT/MERCHANT SECTION ---
+type Merchant struct {
+	ID        string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	Name      string `json:"name" gorm:"unique;not null"`
+	APIKey    string `json:"api_key" gorm:"unique;not null;index"`
+	SecretKey string `json:"secret_key" gorm:"not null"`
+	IsActive  bool   `json:"is_active" gorm:"default:true"`
+}
+
 type ChargeRequest struct {
 	OrderID       string  `json:"order_id" binding:"required"`
 	Amount        float64 `json:"amount" binding:"required,gt=0"`
@@ -13,7 +21,7 @@ type ChargeRequest struct {
 
 type Transaction struct {
 	ID               string    `json:"id" gorm:"primaryKey;type:uuid"`
-	MerchantID       string    `json:"merchant_id" gorm:"type:varchar(255)"`
+	MerchantID       string    `json:"merchant_id" gorm:"type:uuid"`
 	PaymentGatewayID string    `json:"payment_gateway_id" gorm:"type:uuid"`
 	OrderID          string    `json:"order_id" gorm:"type:varchar(255)"`
 	Amount           float64   `json:"amount" gorm:"type:decimal(15,2)"`
@@ -32,15 +40,16 @@ type ChargeResponse struct {
 
 // --- ADMIN/CMS SECTION ---
 type PaymentGateway struct {
-	ID               string `gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
-	Name             string `gorm:"unique"`
-	BaseURL          string
-	ChargeEndpoint   string
-	AuthType         string
-	CustomAuthHeader string
-	RequestTemplate  string `gorm:"type:jsonb"`
-	ResponseMapping  string `gorm:"type:jsonb"`
-	IsActive         bool   `gorm:"default:true"`
+	ID               string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	Name             string `json:"name" gorm:"unique"`
+	BaseURL          string `json:"base_url"`
+	ChargeEndpoint   string `json:"charge_endpoint"`
+	AuthType         string `json:"auth_type"`
+	CustomAuthHeader string `json:"custom_auth_header"`
+	ServerKey        string `json:"server_key"` // Menampung ServerKey/APIKey target PG (Akan dienkripsi)
+	RequestTemplate  string `json:"request_template" gorm:"type:jsonb"`
+	ResponseMapping  string `json:"response_mapping" gorm:"type:jsonb"`
+	IsActive         bool   `json:"is_active" gorm:"default:true"`
 }
 
 type Admin struct {

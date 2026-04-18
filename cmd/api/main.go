@@ -15,10 +15,10 @@ func main() {
 	cfg := config.LoadConfig()
 	db := repository.InitDB(cfg)
 
-	// Inisialisasi Service & Handlers
-	chargeSvc := service.NewChargeService(db)
+	// Inject Dependency Config dan DB
+	chargeSvc := service.NewChargeService(db, cfg)
 	chargeHandler := deliveryHttp.NewChargeHandler(chargeSvc)
-	adminHandler := deliveryHttp.NewAdminHandler(db) // Handler Admin Baru
+	adminHandler := deliveryHttp.NewAdminHandler(db, cfg)
 
 	gin.SetMode(cfg.GinMode)
 	router := gin.Default()
@@ -27,7 +27,8 @@ func main() {
 	{
 		// --- JALUR MERCHANT (HMAC) ---
 		merchant := v1.Group("")
-		merchant.Use(middleware.APISecurityMiddleware())
+		// Masukkan database ke middleware untuk verifikasi ke tabel Merchant
+		merchant.Use(middleware.APISecurityMiddleware(db))
 		{
 			merchant.POST("/charges", chargeHandler.CreateCharge)
 			merchant.GET("/charges/:id", chargeHandler.GetChargeStatus)
@@ -37,13 +38,18 @@ func main() {
 		v1.POST("/webhooks/midtrans", chargeHandler.MidtransWebhook)
 
 		// --- JALUR CMS ADMIN (JWT) ---
-		v1.POST("/admin/login", adminHandler.Login) // Login buat dapet token
+		v1.POST("/admin/login", adminHandler.Login)
 
 		cms := v1.Group("/cms")
-		cms.Use(middleware.JWTAuthMiddleware()) // Proteksi JWT
+		cms.Use(middleware.JWTAuthMiddleware())
 		{
-			cms.POST("/gateways", adminHandler.CreateGateway) // Nambah PG dari UI
-			cms.GET("/gateways", adminHandler.GetGateways)    // List PG di UI
+			// Endpoint Gateway
+			cms.POST("/gateways", adminHandler.CreateGateway)
+			cms.GET("/gateways", adminHandler.GetGateways)
+
+			// Endpoint Merchant
+			cms.POST("/merchants", adminHandler.CreateMerchant)
+			cms.GET("/merchants", adminHandler.GetMerchants)
 		}
 	}
 

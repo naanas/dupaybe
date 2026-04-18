@@ -11,11 +11,9 @@ import (
 )
 
 func InitDB(cfg *config.Config) *gorm.DB {
-	// Pastikan DATABASE_URL di .env pakai port 5432 (Session Mode)
 	dsn := cfg.DatabaseURL
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		// Tambahkan logger biar kita bisa liat SQL mana yang error
 		Logger: logger.Default.LogMode(logger.Info),
 	})
 
@@ -25,11 +23,8 @@ func InitDB(cfg *config.Config) *gorm.DB {
 
 	log.Println("✅ Berhasil koneksi ke database Supabase")
 
-	// PENTING: Karena database lo udah ada isinya tapi strukturnya bentrok,
-	// AutoMigrate bakal terus-terusan error SQLSTATE 42P07.
-	// Hapus tabel sekali lagi lewat SQL Editor Supabase: DROP TABLE IF EXISTS payment_gateways CASCADE;
-
 	err = db.AutoMigrate(
+		&models.Merchant{}, // Tambahan Tabel Merchant
 		&models.PaymentGateway{},
 		&models.Transaction{},
 		&models.Admin{},
@@ -37,7 +32,6 @@ func InitDB(cfg *config.Config) *gorm.DB {
 
 	if err != nil {
 		log.Printf("⚠️ Gagal migrasi otomatis: %v", err)
-		log.Println("💡 Tip: Jalankan 'DROP TABLE IF EXISTS payment_gateways, transactions CASCADE;' di dashboard Supabase")
 	} else {
 		log.Println("✅ Tabel database siap digunakan")
 	}

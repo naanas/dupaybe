@@ -17,7 +17,6 @@ func NewChargeHandler(cs service.ChargeService) *ChargeHandler {
 	return &ChargeHandler{chargeService: cs}
 }
 
-// POST /v1/charges
 func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 	var req models.ChargeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -27,9 +26,18 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 
 	idempotencyKey := c.GetHeader("X-Idempotency-Key")
 
-	trx, err := h.chargeService.ProcessCharge(&req, idempotencyKey)
+	// Ambil ID Merchant dari Context yang disisipkan oleh Middleware
+	merchantIDContext, exists := c.Get("merchant_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized access"})
+		return
+	}
+	merchantID := merchantIDContext.(string)
+
+	// Teruskan merchantID ke Service
+	trx, err := h.chargeService.ProcessCharge(&req, idempotencyKey, merchantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save transaction: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process charge: " + err.Error()})
 		return
 	}
 
@@ -40,7 +48,6 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 	})
 }
 
-// GET /v1/charges/:id
 func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
 	transactionID := c.Param("id")
 
@@ -56,7 +63,6 @@ func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
 	})
 }
 
-// POST /v1/webhooks/midtrans
 func (h *ChargeHandler) MidtransWebhook(c *gin.Context) {
 	var notification map[string]interface{}
 	if err := c.ShouldBindJSON(&notification); err != nil {
@@ -64,7 +70,6 @@ func (h *ChargeHandler) MidtransWebhook(c *gin.Context) {
 		return
 	}
 
-	// Ekstrak data dari notifikasi Midtrans
 	orderID, ok1 := notification["order_id"].(string)
 	transactionStatus, ok2 := notification["transaction_status"].(string)
 
@@ -75,7 +80,6 @@ func (h *ChargeHandler) MidtransWebhook(c *gin.Context) {
 
 	log.Printf("🔔 Webhook Midtrans! Order: %s, Status: %s", orderID, transactionStatus)
 
-	// Pemetaan status Midtrans ke standar internal Dupay
 	internalStatus := "PENDING"
 	switch transactionStatus {
 	case "settlement", "capture":
@@ -84,7 +88,6 @@ func (h *ChargeHandler) MidtransWebhook(c *gin.Context) {
 		internalStatus = "FAILED"
 	}
 
-	// Update ke Database
 	err := h.chargeService.UpdateStatus(orderID, internalStatus)
 	if err != nil {
 		log.Printf("❌ Webhook Error: %v", err)
