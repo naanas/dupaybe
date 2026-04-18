@@ -16,8 +16,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// Interface sudah dilengkapi
 type ChargeService interface {
 	ProcessCharge(req *models.ChargeRequest, idempotencyKey string) (*models.Transaction, error)
+	GetTransaction(id string) (*models.Transaction, error)
+	UpdateStatus(orderID string, status string) error
 }
 
 type chargeService struct {
@@ -40,7 +43,6 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	}
 
 	// 2. TEMPLATE ENGINE: Merakit Request JSON secara dinamis
-	// Mengubah "{{amount}}" menjadi nominal asli, dll.
 	payloadStr := pg.RequestTemplate
 	payloadStr = strings.ReplaceAll(payloadStr, "{{order_id}}", req.OrderID)
 	payloadStr = strings.ReplaceAll(payloadStr, "{{amount}}", fmt.Sprintf("%.0f", req.Amount))
@@ -55,7 +57,7 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// 4. Set Autentikasi secara dinamis (Misal pakai server key Klien, untuk MVP kita hardcode dummy)
+	// 4. Set Autentikasi secara dinamis
 	dummyServerKey := "ServerKey-123"
 	switch pg.AuthType {
 	case "BASIC_AUTH":
@@ -77,11 +79,10 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	respBody, _ := io.ReadAll(resp.Body)
 	respStr := string(respBody)
 
-	// 6. JSONPath MAPPING: Ekstrak URL dan ID dari response yang strukturnya nggak kita ketahui
+	// 6. JSONPath MAPPING: Ekstrak URL dan ID dari response
 	var responseMapping map[string]string
 	json.Unmarshal([]byte(pg.ResponseMapping), &responseMapping)
 
-	// Menggunakan gjson untuk mengambil nilai berdasarkan path dari database (misal path "transaction_id")
 	pgRefID := gjson.Get(respStr, responseMapping["pg_transaction_id"]).String()
 	checkoutURL := gjson.Get(respStr, responseMapping["checkout_url"]).String()
 
@@ -104,4 +105,25 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	}
 
 	return trx, nil
+}
+
+// Fungsi tambahan yang kurang sebelumnya
+func (s *chargeService) GetTransaction(id string) (*models.Transaction, error) {
+	var trx models.Transaction
+	if err := s.db.Where("id = ?", id).First(&trx).Error; err != nil {
+		return nil, errors.New("transaction not found")
+	}
+	return &trx, nil
+}
+
+// Fungsi tambahan yang kurang sebelumnya
+func (s *chargeService) UpdateStatus(orderID string, status string) error {
+	result := s.db.Model(&models.Transaction{}).Where("order_id = ?", orderID).Update("status", status)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("order_id not found")
+	}
+	return nil
 }
