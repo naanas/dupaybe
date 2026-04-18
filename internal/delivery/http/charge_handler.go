@@ -3,6 +3,7 @@ package http
 import (
 	"dupay/internal/models"
 	"dupay/internal/service"
+	"io"
 	"log"
 	"net/http"
 
@@ -17,6 +18,7 @@ func NewChargeHandler(cs service.ChargeService) *ChargeHandler {
 	return &ChargeHandler{chargeService: cs}
 }
 
+// POST /v1/charges
 func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 	var req models.ChargeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -24,20 +26,21 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 		return
 	}
 
+	// Ambil X-Idempotency-Key dari header
 	idempotencyKey := c.GetHeader("X-Idempotency-Key")
 
-	// Ambil ID Merchant dari Context yang disisipkan oleh Middleware
+	// PENTING: Ambil merchant_id yang sudah divalidasi dan disisipkan oleh APISecurityMiddleware
 	merchantIDContext, exists := c.Get("merchant_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized access"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Akses tidak sah: Merchant ID tidak ditemukan"})
 		return
 	}
 	merchantID := merchantIDContext.(string)
 
-	// Teruskan merchantID ke Service
+	// Eksekusi proses charge dengan merchant_id yang dinamis
 	trx, err := h.chargeService.ProcessCharge(&req, idempotencyKey, merchantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process charge: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal memproses charge: " + err.Error()})
 		return
 	}
 
@@ -48,6 +51,7 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 	})
 }
 
+// GET /v1/charges/:id
 func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
 	transactionID := c.Param("id")
 
@@ -63,35 +67,39 @@ func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
 	})
 }
 
-func (h *ChargeHandler) MidtransWebhook(c *gin.Context) {
-	var notification map[string]interface{}
-	if err := c.ShouldBindJSON(&notification); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
-		return
-	}
+// ----------------------------------------------------------------------
+// UNIVERSAL WEBHOOK HANDLER
+// ----------------------------------------------------------------------
+// POST /v1/webhooks/:gateway_name
+// Handler ini sekarang otomatis mendukung Midtrans, Xendit, atau PG lainnya
+// selama konfigurasi 'webhook_mapping' di CMS sudah diisi dengan benar.
+func (h *ChargeHandler) HandleWebhook(c *gin.Context) {
+	// Ambil nama gateway dari URL (misal: "midtrans" atau "xendit")
+	gatewayName := c.Param("gateway_name")
 
-	orderID, ok1 := notification["order_id"].(string)
-	transactionStatus, ok2 := notification["transaction_status"].(string)
-
-	if !ok1 || !ok2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing required fields"})
-		return
-	}
-
-	log.Printf("🔔 Webhook Midtrans! Order: %s, Status: %s", orderID, transactionStatus)
-
-	internalStatus := "PENDING"
-	switch transactionStatus {
-	case "settlement", "capture":
-		internalStatus = "SUCCESS"
-	case "deny", "cancel", "expire":
-		internalStatus = "FAILED"
-	}
-
-	err := h.chargeService.UpdateStatus(orderID, internalStatus)
+	// Baca seluruh body request dari Payment Gateway
+	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		log.Printf("❌ Webhook Error: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Gagal membaca body payload"})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "received"})
+	payloadStr := string(bodyBytes)
+	log.Printf("🔔 Notifikasi Webhook diterima dari: %s", gatewayName)
+	log.Printf("📦 Payload: %s", payloadStr)
+
+	// Proses webhook secara dinamis di level service menggunakan mapping database
+	err = h.chargeService.ProcessWebhook(gatewayName, payloadStr)
+	if err != nil {
+		log.Printf("❌ Gagal memproses webhook [%s]: %v", gatewayName, err)
+		// Kirim 500 agar PG mencoba mengirim ulang (retry) jika memang ada error sistem
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Mayoritas Payment Gateway mewajibkan respon 200 OK untuk menghentikan pengiriman ulang
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "received",
+		"gateway": gatewayName,
+	})
 }

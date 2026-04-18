@@ -49,6 +49,7 @@ type PaymentGateway struct {
 	ServerKey        string `json:"server_key"` // Menampung ServerKey/APIKey target PG (Akan dienkripsi)
 	RequestTemplate  string `json:"request_template" gorm:"type:jsonb"`
 	ResponseMapping  string `json:"response_mapping" gorm:"type:jsonb"`
+	WebhookMapping   string `json:"webhook_mapping" gorm:"type:jsonb"` // BARU: Dinamis Webhook Parser
 	IsActive         bool   `json:"is_active" gorm:"default:true"`
 }
 
