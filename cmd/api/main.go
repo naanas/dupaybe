@@ -13,35 +13,40 @@ import (
 
 func main() {
 	cfg := config.LoadConfig()
-
-	// 1. Inisialisasi DB (GORM)
 	db := repository.InitDB(cfg)
 
-	// 2. Setup Gin
+	// Inisialisasi Service & Handlers
+	chargeSvc := service.NewChargeService(db)
+	chargeHandler := deliveryHttp.NewChargeHandler(chargeSvc)
+	adminHandler := deliveryHttp.NewAdminHandler(db) // Handler Admin Baru
+
 	gin.SetMode(cfg.GinMode)
 	router := gin.Default()
 
-	// 3. Inject DB ke Service, lalu Service ke Handler
-	chargeSvc := service.NewChargeService(db)
-	chargeHandler := deliveryHttp.NewChargeHandler(chargeSvc)
-
-	// 4. Setup Routes
 	v1 := router.Group("/v1")
 	{
-		// Endpoint khusus Klien (Diproteksi HMAC)
-		protected := v1.Group("")
-		protected.Use(middleware.APISecurityMiddleware())
-		protected.POST("/charges", chargeHandler.CreateCharge)
-		protected.GET("/charges/:id", chargeHandler.GetChargeStatus)
+		// --- JALUR MERCHANT (HMAC) ---
+		merchant := v1.Group("")
+		merchant.Use(middleware.APISecurityMiddleware())
+		{
+			merchant.POST("/charges", chargeHandler.CreateCharge)
+			merchant.GET("/charges/:id", chargeHandler.GetChargeStatus)
+		}
 
-		// Endpoint Webhook PG (Tanpa HMAC Klien)
-		webhooks := v1.Group("/webhooks")
-		webhooks.POST("/midtrans", chargeHandler.MidtransWebhook)
+		// --- JALUR WEBHOOK (TIDAK ADA AUTH) ---
+		v1.POST("/webhooks/midtrans", chargeHandler.MidtransWebhook)
+
+		// --- JALUR CMS ADMIN (JWT) ---
+		v1.POST("/admin/login", adminHandler.Login) // Login buat dapet token
+
+		cms := v1.Group("/cms")
+		cms.Use(middleware.JWTAuthMiddleware()) // Proteksi JWT
+		{
+			cms.POST("/gateways", adminHandler.CreateGateway) // Nambah PG dari UI
+			cms.GET("/gateways", adminHandler.GetGateways)    // List PG di UI
+		}
 	}
 
-	// 5. Jalankan Server
-	log.Printf("🚀 Dupay API is running on port %s", cfg.Port)
-	if err := router.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
-	}
+	log.Printf("🚀 Dupay Engine & CMS API running on port %s", cfg.Port)
+	router.Run(":" + cfg.Port)
 }
