@@ -4,11 +4,12 @@ import "time"
 
 // --- CLIENT/MERCHANT SECTION ---
 type Merchant struct {
-	ID        string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
-	Name      string `json:"name" gorm:"unique;not null"`
-	APIKey    string `json:"api_key" gorm:"unique;not null;index"`
-	SecretKey string `json:"secret_key" gorm:"not null"`
-	IsActive  bool   `json:"is_active" gorm:"default:true"`
+	ID             string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	Name           string `json:"name" gorm:"unique;not null"`
+	APIKey         string `json:"api_key" gorm:"unique;not null;index"`
+	SecretKey      string `json:"secret_key" gorm:"not null"`
+	WhitelistedIPs string `json:"whitelisted_ips" gorm:"type:text"` // BARU: Menyimpan IP Address (dipisah koma)
+	IsActive       bool   `json:"is_active" gorm:"default:true"`
 }
 
 type ChargeRequest struct {
@@ -24,6 +25,7 @@ type Transaction struct {
 	MerchantID       string    `json:"merchant_id" gorm:"type:uuid"`
 	PaymentGatewayID string    `json:"payment_gateway_id" gorm:"type:uuid"`
 	OrderID          string    `json:"order_id" gorm:"type:varchar(255)"`
+	IdempotencyKey   string    `json:"idempotency_key" gorm:"type:varchar(255);index"`
 	Amount           float64   `json:"amount" gorm:"type:decimal(15,2)"`
 	PaymentMethod    string    `json:"payment_method" gorm:"type:varchar(50)"`
 	Status           string    `json:"status" gorm:"type:varchar(50)"`
@@ -40,17 +42,19 @@ type ChargeResponse struct {
 
 // --- ADMIN/CMS SECTION ---
 type PaymentGateway struct {
-	ID               string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
-	Name             string `json:"name" gorm:"unique"`
-	BaseURL          string `json:"base_url"`
-	ChargeEndpoint   string `json:"charge_endpoint"`
-	AuthType         string `json:"auth_type"`
-	CustomAuthHeader string `json:"custom_auth_header"`
-	ServerKey        string `json:"server_key"` // Menampung ServerKey/APIKey target PG (Akan dienkripsi)
-	RequestTemplate  string `json:"request_template" gorm:"type:jsonb"`
-	ResponseMapping  string `json:"response_mapping" gorm:"type:jsonb"`
-	WebhookMapping   string `json:"webhook_mapping" gorm:"type:jsonb"` // BARU: Dinamis Webhook Parser
-	IsActive         bool   `json:"is_active" gorm:"default:true"`
+	ID                    string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	Name                  string `json:"name" gorm:"unique"`
+	BaseURL               string `json:"base_url"`
+	ChargeEndpoint        string `json:"charge_endpoint"`
+	AuthType              string `json:"auth_type"`
+	CustomAuthHeader      string `json:"custom_auth_header"`
+	ServerKey             string `json:"server_key"`
+	RequestTemplate       string `json:"request_template" gorm:"type:jsonb"`
+	ResponseMapping       string `json:"response_mapping" gorm:"type:jsonb"`
+	WebhookMapping        string `json:"webhook_mapping" gorm:"type:jsonb"`
+	WebhookSecret         string `json:"webhook_secret"`
+	WebhookValidationType string `json:"webhook_validation_type"`
+	IsActive              bool   `json:"is_active" gorm:"default:true"`
 }
 
 type Admin struct {

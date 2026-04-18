@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -29,21 +30,25 @@ func (h *AdminHandler) Login(c *gin.Context) {
 		return
 	}
 
-	if req.Username == "admin" && req.Password == "dupay123" {
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"username": req.Username,
-			"exp":      time.Now().Add(time.Hour * 24).Unix(),
-		})
-
-		tokenString, _ := token.SignedString([]byte("DUPAY_CMS_SECRET_KEY_2024"))
-		c.JSON(http.StatusOK, gin.H{"token": tokenString})
+	var admin models.Admin
+	if err := h.db.Where("username = ?", req.Username).First(&admin).Error; err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Username atau password salah"})
 		return
 	}
 
-	c.JSON(http.StatusUnauthorized, gin.H{"error": "Username atau password salah"})
-}
+	if err := bcrypt.CompareHashAndPassword([]byte(admin.Password), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Username atau password salah"})
+		return
+	}
 
-// --- GATEWAY MANAGEMENT ---
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"username": admin.Username,
+		"exp":      time.Now().Add(time.Hour * 24).Unix(),
+	})
+
+	tokenString, _ := token.SignedString([]byte("DUPAY_CMS_SECRET_KEY_2024"))
+	c.JSON(http.StatusOK, gin.H{"token": tokenString})
+}
 
 func (h *AdminHandler) CreateGateway(c *gin.Context) {
 	var pg models.PaymentGateway
@@ -52,7 +57,6 @@ func (h *AdminHandler) CreateGateway(c *gin.Context) {
 		return
 	}
 
-	// ENKRIPSI SERVER KEY sebelum masuk ke Database (AES-256)
 	if pg.ServerKey != "" {
 		encryptedKey, err := crypto.EncryptAES([]byte(h.cfg.AppEncryptionKey), pg.ServerKey)
 		if err != nil {
@@ -76,23 +80,24 @@ func (h *AdminHandler) GetGateways(c *gin.Context) {
 	c.JSON(http.StatusOK, gateways)
 }
 
-// --- MERCHANT / CLIENT MANAGEMENT ---
+// --- FITUR MERCHANT DIUPDATE UNTUK IP WHITELIST ---
 
 func (h *AdminHandler) CreateMerchant(c *gin.Context) {
 	var req struct {
-		Name string `json:"name" binding:"required"`
+		Name           string `json:"name" binding:"required"`
+		WhitelistedIPs string `json:"whitelisted_ips"` // Optional: Bisa 1 IP atau dipisah koma (contoh: "192.168.1.1, 10.0.0.5")
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Generate Kredensial Unik untuk Client Baru
 	merchant := models.Merchant{
-		Name:      req.Name,
-		APIKey:    "pk_" + uuid.New().String(),
-		SecretKey: "sk_" + uuid.New().String(),
-		IsActive:  true,
+		Name:           req.Name,
+		APIKey:         "pk_" + uuid.New().String(),
+		SecretKey:      "sk_" + uuid.New().String(),
+		WhitelistedIPs: req.WhitelistedIPs, // Simpan ke database
+		IsActive:       true,
 	}
 
 	if err := h.db.Create(&merchant).Error; err != nil {

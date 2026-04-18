@@ -6,12 +6,12 @@ import (
 	"dupay/pkg/crypto"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
-// Menambahkan dependensi db ke dalam middleware
 func APISecurityMiddleware(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-API-KEY")
@@ -23,24 +23,48 @@ func APISecurityMiddleware(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		// 1. Cari Merchant di Database berdasarkan API Key
+		// 1. Cari Merchant berdasarkan API Key
 		var merchant models.Merchant
 		if err := db.Where("api_key = ? AND is_active = ?", apiKey, true).First(&merchant).Error; err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API Key or Inactive Merchant"})
 			return
 		}
 
+		// 2. LAYER KEAMANAN: IP WHITELISTING
+		// Jika database merchant punya catatan IP, kita wajib cek IP penembak
+		if merchant.WhitelistedIPs != "" {
+			clientIP := c.ClientIP() // Gin otomatis mengambil IP asli klien dari Header/Socket
+			isAllowed := false
+
+			// Pisahkan berdasarkan koma (karena bisa jadi 1 merchant punya >1 server/IP)
+			allowedIPs := strings.Split(merchant.WhitelistedIPs, ",")
+			for _, ip := range allowedIPs {
+				if strings.TrimSpace(ip) == clientIP {
+					isAllowed = true
+					break
+				}
+			}
+
+			// Tolak jika IP tidak terdaftar
+			if !isAllowed {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+					"error": "FORBIDDEN: Alamat IP Anda (" + clientIP + ") tidak diizinkan untuk mengakses API Key ini",
+				})
+				return
+			}
+		}
+
 		// Baca body
 		bodyBytes, _ := io.ReadAll(c.Request.Body)
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-		// 2. Verifikasi Signature menggunakan SecretKey asli milik Merchant tersebut
+		// 3. Verifikasi Digital Signature HMAC
 		if !crypto.VerifySignature(string(bodyBytes), timestamp, merchant.SecretKey, signature) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid digital signature"})
 			return
 		}
 
-		// 3. Sisipkan ID Merchant ke dalam Context agar bisa dipakai oleh handler
+		// 4. Sisipkan ID Merchant ke dalam Context
 		c.Set("merchant_id", merchant.ID)
 
 		c.Next()

@@ -18,7 +18,6 @@ func NewChargeHandler(cs service.ChargeService) *ChargeHandler {
 	return &ChargeHandler{chargeService: cs}
 }
 
-// POST /v1/charges
 func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 	var req models.ChargeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -26,21 +25,18 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 		return
 	}
 
-	// Ambil X-Idempotency-Key dari header
 	idempotencyKey := c.GetHeader("X-Idempotency-Key")
 
-	// PENTING: Ambil merchant_id yang sudah divalidasi dan disisipkan oleh APISecurityMiddleware
 	merchantIDContext, exists := c.Get("merchant_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Akses tidak sah: Merchant ID tidak ditemukan"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized access"})
 		return
 	}
 	merchantID := merchantIDContext.(string)
 
-	// Eksekusi proses charge dengan merchant_id yang dinamis
 	trx, err := h.chargeService.ProcessCharge(&req, idempotencyKey, merchantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal memproses charge: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -51,7 +47,6 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 	})
 }
 
-// GET /v1/charges/:id
 func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
 	transactionID := c.Param("id")
 
@@ -67,17 +62,16 @@ func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
 	})
 }
 
-// ----------------------------------------------------------------------
-// UNIVERSAL WEBHOOK HANDLER
-// ----------------------------------------------------------------------
-// POST /v1/webhooks/:gateway_name
-// Handler ini sekarang otomatis mendukung Midtrans, Xendit, atau PG lainnya
-// selama konfigurasi 'webhook_mapping' di CMS sudah diisi dengan benar.
 func (h *ChargeHandler) HandleWebhook(c *gin.Context) {
-	// Ambil nama gateway dari URL (misal: "midtrans" atau "xendit")
 	gatewayName := c.Param("gateway_name")
 
-	// Baca seluruh body request dari Payment Gateway
+	// FIX: MENGAMBIL HEADER KEAMANAN DARI PAYMENT GATEWAY
+	// Xendit biasanya menggunakan "X-Callback-Token", dll. Kita ambil beberapa fallback standar.
+	signature := c.GetHeader("X-Callback-Token")
+	if signature == "" {
+		signature = c.GetHeader("X-Signature") // Bisa disesuaikan lagi jika butuh standard lain
+	}
+
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Gagal membaca body payload"})
@@ -85,21 +79,14 @@ func (h *ChargeHandler) HandleWebhook(c *gin.Context) {
 	}
 
 	payloadStr := string(bodyBytes)
-	log.Printf("🔔 Notifikasi Webhook diterima dari: %s", gatewayName)
-	log.Printf("📦 Payload: %s", payloadStr)
 
-	// Proses webhook secara dinamis di level service menggunakan mapping database
-	err = h.chargeService.ProcessWebhook(gatewayName, payloadStr)
+	// FIX: Oper signature ke service untuk divalidasi
+	err = h.chargeService.ProcessWebhook(gatewayName, payloadStr, signature)
 	if err != nil {
-		log.Printf("❌ Gagal memproses webhook [%s]: %v", gatewayName, err)
-		// Kirim 500 agar PG mencoba mengirim ulang (retry) jika memang ada error sistem
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("❌ Webhook Error [%s]: %v", gatewayName, err)
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()}) // 403 Forbidden
 		return
 	}
 
-	// Mayoritas Payment Gateway mewajibkan respon 200 OK untuk menghentikan pengiriman ulang
-	c.JSON(http.StatusOK, gin.H{
-		"status":  "received",
-		"gateway": gatewayName,
-	})
+	c.JSON(http.StatusOK, gin.H{"status": "received"})
 }
