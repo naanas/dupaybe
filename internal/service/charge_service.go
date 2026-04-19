@@ -89,6 +89,9 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		httpReq, _ = http.NewRequest("POST", targetURL, bytes.NewBuffer([]byte(payloadStr)))
 		httpReq.Header.Set("Content-Type", "application/json")
 
+		// ---> INI BARIS YANG GUE LUPA KEMARIN BOSS <---
+		httpReq.Header.Set("Authorization", "Bearer "+decryptedServerKey)
+
 	case "IPAYMU_V2":
 		buffer := new(bytes.Buffer)
 		if err := json.Compact(buffer, []byte(payloadStr)); err == nil {
