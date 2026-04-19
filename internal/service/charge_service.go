@@ -2,15 +2,18 @@ package service
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"dupay/internal/config"
 	"dupay/internal/models"
 	"dupay/pkg/crypto"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -50,13 +53,11 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		return nil, fmt.Errorf("payment gateway %s tidak ditemukan", req.GatewayName)
 	}
 
-	// 1. Siapkan Template JSON Dasar
 	payloadStr := pg.RequestTemplate
 	payloadStr = strings.ReplaceAll(payloadStr, "{{order_id}}", req.OrderID)
-	payloadStr = strings.ReplaceAll(payloadStr, "{{payment_method}}", req.PaymentMethod)
+	payloadStr = strings.ReplaceAll(payloadStr, "{{payment_method}}", strings.ToLower(req.PaymentMethod))
 	payloadStr = strings.ReplaceAll(payloadStr, "\"{{amount}}\"", fmt.Sprintf("%.0f", req.Amount))
 
-	// 2. Dekripsi Credentials
 	decryptedServerKey := ""
 	if pg.ServerKey != "" {
 		key, _ := crypto.DecryptAES([]byte(s.cfg.AppEncryptionKey), pg.ServerKey)
@@ -69,58 +70,73 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		decryptedPrivateKey = key
 	}
 
-	// ==========================================
-	// 3. ADAPTER TRIPAY (SUNTIK SIGNATURE KE BODY)
-	// ==========================================
-	if strings.Contains(strings.ToLower(pg.Name), "tripay") {
-		// Rumus Tripay: MerchantCode + MerchantRef + Amount
-		sigString := fmt.Sprintf("%s%s%.0f", pg.MerchantCode, req.OrderID, req.Amount)
-		signature := crypto.GenerateHMAC256(sigString, decryptedPrivateKey)
-
-		// FIX: Tripay minta signature di DALAM Payload JSON, bukan di Header!
-		// Kita suntikkan manual ke string JSON sebelum merakit Request
-		payloadStr = strings.TrimSpace(payloadStr)
-		if strings.HasSuffix(payloadStr, "}") {
-			payloadStr = payloadStr[:len(payloadStr)-1] + fmt.Sprintf(`, "signature": "%s"}`, signature)
-		}
-	}
-
-	// 4. Rakit HTTP Request
-	targetURL := pg.BaseURL + pg.ChargeEndpoint
+	targetURL := strings.TrimSuffix(pg.BaseURL, "/") + "/" + strings.TrimPrefix(pg.ChargeEndpoint, "/")
 	httpReq, err := http.NewRequest("POST", targetURL, bytes.NewBuffer([]byte(payloadStr)))
 	if err != nil {
 		return nil, errors.New("gagal merakit HTTP request")
 	}
-
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// 5. Set Autentikasi Standard (Bearer/Basic)
 	switch pg.AuthType {
+	case "TRIPAY_HMAC":
+		sigString := fmt.Sprintf("%s%s%.0f", pg.MerchantCode, req.OrderID, req.Amount)
+		signature := crypto.GenerateHMAC256(sigString, decryptedPrivateKey)
+
+		payloadStr = strings.TrimSpace(payloadStr)
+		if strings.HasSuffix(payloadStr, "}") {
+			payloadStr = payloadStr[:len(payloadStr)-1] + fmt.Sprintf(`, "signature": "%s"}`, signature)
+		}
+		httpReq, _ = http.NewRequest("POST", targetURL, bytes.NewBuffer([]byte(payloadStr)))
+		httpReq.Header.Set("Content-Type", "application/json")
+
+	case "IPAYMU_V2":
+		buffer := new(bytes.Buffer)
+		if err := json.Compact(buffer, []byte(payloadStr)); err == nil {
+			payloadStr = buffer.String()
+		}
+
+		bodyHasher := sha256.New()
+		bodyHasher.Write([]byte(payloadStr))
+		bodyHashStr := hex.EncodeToString(bodyHasher.Sum(nil))
+
+		stringToSign := fmt.Sprintf("POST:%s:%s:%s", pg.MerchantCode, bodyHashStr, decryptedPrivateKey)
+
+		mac := hmac.New(sha256.New, []byte(decryptedPrivateKey))
+		mac.Write([]byte(stringToSign))
+		signatureHex := hex.EncodeToString(mac.Sum(nil))
+
+		timestamp := time.Now().Format("20060102150405")
+
+		httpReq, _ = http.NewRequest("POST", targetURL, bytes.NewBuffer([]byte(payloadStr)))
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("va", pg.MerchantCode)
+		httpReq.Header.Set("signature", signatureHex)
+		httpReq.Header.Set("timestamp", timestamp)
+
 	case "BASIC_AUTH":
 		httpReq.SetBasicAuth(decryptedServerKey, "")
 	case "BEARER_TOKEN", "Bearer Auth":
 		httpReq.Header.Set("Authorization", "Bearer "+decryptedServerKey)
 	case "CUSTOM_HEADER":
-		httpReq.Header.Set(pg.CustomAuthHeader, decryptedServerKey)
+		if pg.CustomAuthHeader != "" {
+			httpReq.Header.Set(pg.CustomAuthHeader, decryptedServerKey)
+		}
 	}
 
-	// 6. Eksekusi Tembakan ke PG Target
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("gagal menghubungi %s: %v", pg.Name, err)
+		return nil, fmt.Errorf("gagal menghubungi PG: %v", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	respStr := string(respBody)
 
-	// TANGKAP ERROR JIKA PG MENOLAK REQUEST
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): %s", pg.Name, resp.StatusCode, respStr)
 	}
 
-	// 7. Mapping Response
 	var responseMapping map[string]string
 	if pg.ResponseMapping != "" && pg.ResponseMapping != "{}" {
 		json.Unmarshal([]byte(pg.ResponseMapping), &responseMapping)
@@ -129,15 +145,6 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	pgRefID := gjson.Get(respStr, responseMapping["pg_transaction_id"]).String()
 	checkoutURL := gjson.Get(respStr, responseMapping["checkout_url"]).String()
 
-	// Fallback khusus kalau response mapping belum disetting
-	if pgRefID == "" {
-		pgRefID = gjson.Get(respStr, "data.reference").String()
-	}
-	if checkoutURL == "" {
-		checkoutURL = gjson.Get(respStr, "data.checkout_url").String()
-	}
-
-	// 8. Simpan ke Database
 	trx := &models.Transaction{
 		ID:               uuid.New().String(),
 		MerchantID:       merchantID,
@@ -190,14 +197,19 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 		decryptedPrivateKey = key
 	}
 
-	if strings.Contains(strings.ToLower(pg.Name), "tripay") {
+	switch pg.AuthType {
+	case "TRIPAY_HMAC":
 		expectedSignature := crypto.GenerateHMAC256(payload, decryptedPrivateKey)
 		if !strings.EqualFold(webhookSignature, expectedSignature) {
 			return errors.New("UNAUTHORIZED: Webhook signature tidak valid")
 		}
-	} else if pg.WebhookValidationType == "TOKEN_MATCH" && pg.WebhookSecret != "" {
-		if webhookSignature != pg.WebhookSecret {
-			return errors.New("UNAUTHORIZED: Webhook token tidak valid")
+	case "IPAYMU_V2":
+		// Bypass verifikasi (iPaymu sering nggak ngasih signature webhook)
+	default:
+		if pg.WebhookValidationType == "TOKEN_MATCH" && pg.WebhookSecret != "" {
+			if webhookSignature != pg.WebhookSecret {
+				return errors.New("UNAUTHORIZED: Webhook token tidak valid")
+			}
 		}
 	}
 
@@ -207,8 +219,28 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 	orderIDPath, _ := mapping["order_id_path"].(string)
 	statusPath, _ := mapping["status_path"].(string)
 
+	// 1. Coba baca secara JSON
 	orderID := gjson.Get(payload, orderIDPath).String()
 	pgStatus := gjson.Get(payload, statusPath).String()
+
+	// 2. FALLBACK: Kalau bukan JSON (kosong), kita parse gaya form-urlencoded
+	if orderID == "" || pgStatus == "" {
+		parsedForm, err := url.ParseQuery(payload)
+		if err == nil {
+			// Ambil berdasarkan mapping CMS
+			orderID = parsedForm.Get(orderIDPath)
+			pgStatus = parsedForm.Get(statusPath)
+
+			// Hard-fallback khusus iPaymu (jaga-jaga mapping lu salah)
+			if orderID == "" && pg.AuthType == "IPAYMU_V2" {
+				orderID = parsedForm.Get("reference_id")
+				if orderID == "" {
+					orderID = parsedForm.Get("sid")
+				}
+				pgStatus = parsedForm.Get("status")
+			}
+		}
+	}
 
 	if orderID == "" || pgStatus == "" {
 		return errors.New("gagal mengekstrak data dari payload")
@@ -217,7 +249,7 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 	internalStatus := "PENDING"
 	if successStatuses, ok := mapping["success_statuses"].([]interface{}); ok {
 		for _, st := range successStatuses {
-			if st.(string) == pgStatus {
+			if strings.EqualFold(st.(string), pgStatus) {
 				internalStatus = "SUCCESS"
 				break
 			}
@@ -225,7 +257,7 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 	}
 	if failedStatuses, ok := mapping["failed_statuses"].([]interface{}); ok {
 		for _, st := range failedStatuses {
-			if st.(string) == pgStatus {
+			if strings.EqualFold(st.(string), pgStatus) {
 				internalStatus = "FAILED"
 				break
 			}
@@ -233,46 +265,37 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 	}
 	if refundedStatuses, ok := mapping["refunded_statuses"].([]interface{}); ok {
 		for _, st := range refundedStatuses {
-			if st.(string) == pgStatus {
+			if strings.EqualFold(st.(string), pgStatus) {
 				internalStatus = "REFUNDED"
 				break
 			}
 		}
 	}
 
-	// 1. Update Database Dupay
 	err := s.UpdateStatus(orderID, internalStatus, pg.ID)
 	if err != nil {
 		return err
 	}
 
-	// 2. TRIGGER WEBHOOK FORWARDER SECARA ASYNC (BACKGROUND)
-	// Kita pakai goroutine (kata kunci 'go') biar nggak bikin nunggu server Tripay-nya
 	go s.forwardWebhookToMerchant(orderID, pg.ID)
 
 	return nil
 }
 
-// --- TAMBAHKAN FUNGSI BARU INI DI PALING BAWAH FILE ---
 func (s *chargeService) forwardWebhookToMerchant(orderID string, gatewayID string) {
-	// 1. Cari data Transaksi Lengkap
 	var trx models.Transaction
 	if err := s.db.Where("order_id = ? AND payment_gateway_id = ?", orderID, gatewayID).First(&trx).Error; err != nil {
-		return // Transaksi gak ketemu, batal forward
+		return
 	}
 
-	// 2. Cari data Merchant untuk ambil WebhookURL & SecretKey
 	var merchant models.Merchant
 	if err := s.db.Where("id = ?", trx.MerchantID).First(&merchant).Error; err != nil {
 		return
 	}
-
 	if merchant.WebhookURL == "" {
-		log.Printf("⚠️ [WEBHOOK FORWARDER] Merchant %s tidak punya Webhook URL, skip forwarding.", merchant.Name)
 		return
 	}
 
-	// 3. Rakit Payload Bersih Ala Dupay (Standarisasi)
 	payloadObj := map[string]interface{}{
 		"order_id":       trx.OrderID,
 		"amount":         trx.Amount,
@@ -281,25 +304,13 @@ func (s *chargeService) forwardWebhookToMerchant(orderID string, gatewayID strin
 		"timestamp":      time.Now().Unix(),
 	}
 	payloadBytes, _ := json.Marshal(payloadObj)
-	payloadStr := string(payloadBytes)
 
-	// 4. Bikin Signature Dupay (Biar Klien tau ini asli dari kita, bukan hacker)
-	// Kita hash pakai SecretKey si Merchant (sk_...)
-	signature := crypto.GenerateHMAC256(payloadStr, merchant.SecretKey)
+	signature := crypto.GenerateHMAC256(string(payloadBytes), merchant.SecretKey)
 
-	// 5. Tembak ke Server Klien
 	httpReq, _ := http.NewRequest("POST", merchant.WebhookURL, bytes.NewBuffer(payloadBytes))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Dupay-Signature", signature)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(httpReq)
-
-	if err != nil {
-		log.Printf("❌ [WEBHOOK FORWARDER] Gagal nembak ke %s: %v", merchant.Name, err)
-		return
-	}
-	defer resp.Body.Close()
-
-	log.Printf("✅ [WEBHOOK FORWARDER] Sukses kirim status %s ke %s (HTTP %d)", trx.Status, merchant.Name, resp.StatusCode)
+	client.Do(httpReq)
 }

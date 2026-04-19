@@ -16,3 +16,10 @@ func VerifySignature(payload, timestamp, secret, clientSignature string) bool {
 	expected := GenerateHMAC256(payload+timestamp, secret)
 	return hmac.Equal([]byte(expected), []byte(clientSignature))
 }
+
+// Tambahkan fungsi ini di dalam folder pkg/crypto/ lu
+func GenerateSHA256(data string) string {
+	h := sha256.New()
+	h.Write([]byte(data))
+	return hex.EncodeToString(h.Sum(nil))
+}
