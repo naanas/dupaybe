@@ -3,41 +3,24 @@ package main
 import (
 	"dupay/internal/config"
 	"dupay/internal/delivery/http"
-	"dupay/internal/models"
+	"dupay/internal/repository"
 	"log"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/bcrypt"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
 func main() {
 	// 1. Load Configuration
 	cfg := config.LoadConfig()
 
-	// 2. Connect to Database
-	db, err := gorm.Open(postgres.Open(cfg.DBURL), &gorm.Config{})
-	if err != nil {
-		log.Fatalf("Gagal connect ke database: %v", err)
-	}
+	// 2. Connect DB pakai fungsi InitDB di folder repository
+	db := repository.InitDB(cfg)
 
-	// 3. Auto Migrate (Termasuk kolom baru di Merchant)
-	db.AutoMigrate(
-		&models.Merchant{},
-		&models.PaymentGateway{},
-		&models.Transaction{},
-		&models.Admin{},
-	)
-
-	// 4. Seed Default Admin (Jika belum ada)
-	seedAdmin(db)
-
-	// 5. Setup Gin Router
+	// 3. Setup Gin Router
 	r := gin.Default()
 
-	// --- 6. KONFIGURASI CORS (SANGAT PENTING UNTUK NEXT.JS) ---
+	// 4. KONFIGURASI CORS (Biar Next.js nggak kena Failed to Fetch)
 	corsConfig := cors.DefaultConfig()
 	corsConfig.AllowOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
@@ -45,18 +28,17 @@ func main() {
 	corsConfig.ExposeHeaders = []string{"Content-Length"}
 	corsConfig.AllowCredentials = true
 	r.Use(cors.New(corsConfig))
-	// ----------------------------------------------------------
 
-	// 7. Setup Handlers
+	// 5. Setup Handlers
 	adminHandler := http.NewAdminHandler(db, cfg)
 
-	// 8. Setup Routes
+	// 6. Setup Routes
 	v1 := r.Group("/v1")
 	{
 		// Auth
 		v1.POST("/admin/login", adminHandler.Login)
 
-		// CMS Routes (Idealnya ini dibungkus middleware JWT, tapi untuk sekarang kita buka dulu)
+		// CMS Routes
 		cms := v1.Group("/cms")
 		{
 			cms.POST("/merchants", adminHandler.CreateMerchant)
@@ -67,21 +49,7 @@ func main() {
 		}
 	}
 
-	// 9. Jalankan Server
+	// 7. Jalankan Server
 	log.Println("🚀 Dupay Backend berjalan di port :8080")
 	r.Run(":8080")
-}
-
-// Fungsi helper untuk membuat admin default
-func seedAdmin(db *gorm.DB) {
-	var count int64
-	db.Model(&models.Admin{}).Count(&count)
-	if count == 0 {
-		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("dupay123"), bcrypt.DefaultCost)
-		db.Create(&models.Admin{
-			Username: "admin",
-			Password: string(hashedPassword),
-		})
-		log.Println("🔑 Default Admin created! (Username: admin, Password: dupay123)")
-	}
 }
