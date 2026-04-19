@@ -4,11 +4,14 @@ import "time"
 
 // --- CLIENT/MERCHANT SECTION ---
 type Merchant struct {
-	ID             string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
-	Name           string `json:"name" gorm:"unique;not null"`
-	Email          string `json:"email" gorm:"unique"` // BARU
-	Phone          string `json:"phone"`               // BARU
-	PICName        string `json:"pic_name"`            // BARU
+	ID   string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	Name string `json:"name" gorm:"unique;not null"`
+
+	// FIX: Tambahkan column:business_email agar GORM tau nama kolom aslinya di database
+	Email string `json:"email" gorm:"column:business_email;unique;not null"`
+
+	Phone          string `json:"phone"`
+	PICName        string `json:"pic_name"`
 	APIKey         string `json:"api_key" gorm:"unique;not null;index"`
 	SecretKey      string `json:"secret_key" gorm:"not null"`
 	WhitelistedIPs string `json:"whitelisted_ips" gorm:"type:text"`

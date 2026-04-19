@@ -46,6 +46,9 @@ func main() {
 
 			cms.POST("/gateways", adminHandler.CreateGateway)
 			cms.GET("/gateways", adminHandler.GetGateways)
+
+			cms.PUT("/merchants/:id", adminHandler.UpdateMerchant)    // TAMBAH INI
+			cms.DELETE("/merchants/:id", adminHandler.DeleteMerchant) // TAMBAH INI
 		}
 	}
 

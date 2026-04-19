@@ -118,3 +118,46 @@ func (h *AdminHandler) GetMerchants(c *gin.Context) {
 	h.db.Find(&merchants)
 	c.JSON(http.StatusOK, merchants)
 }
+func (h *AdminHandler) UpdateMerchant(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		Name           string `json:"name"`
+		Email          string `json:"email"`
+		Phone          string `json:"phone"`
+		PICName        string `json:"pic_name"`
+		WhitelistedIPs string `json:"whitelisted_ips"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var merchant models.Merchant
+	if err := h.db.Where("id = ?", id).First(&merchant).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Merchant tidak ditemukan"})
+		return
+	}
+
+	// Update data
+	merchant.Name = req.Name
+	merchant.Email = req.Email
+	merchant.Phone = req.Phone
+	merchant.PICName = req.PICName
+	merchant.WhitelistedIPs = req.WhitelistedIPs
+
+	if err := h.db.Save(&merchant).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Merchant berhasil diupdate", "data": merchant})
+}
+
+func (h *AdminHandler) DeleteMerchant(c *gin.Context) {
+	id := c.Param("id")
+	if err := h.db.Where("id = ?", id).Delete(&models.Merchant{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Merchant berhasil dihapus"})
+}
