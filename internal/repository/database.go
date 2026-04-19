@@ -1,53 +1,55 @@
-package repository
+package main
 
 import (
 	"dupay/internal/config"
-	"dupay/internal/models"
+	"dupay/internal/delivery/http"
+	"dupay/internal/repository" // Manggil file repository lu yang barusan
 	"log"
 
-	"golang.org/x/crypto/bcrypt"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 )
 
-func InitDB(cfg *config.Config) *gorm.DB {
-	dsn := cfg.DatabaseURL
+func main() {
+	// 1. Load Configuration
+	cfg := config.LoadConfig()
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
-	})
+	// 2. Connect DB pakai fungsi InitDB buatan lu di folder repository
+	db := repository.InitDB(cfg)
 
-	if err != nil {
-		log.Fatalf("❌ Gagal koneksi ke database: %v", err)
+	// 3. Setup Gin Router
+	r := gin.Default()
+
+	// 4. KONFIGURASI CORS (Biar Next.js nggak kena Failed to Fetch)
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Authorization", "X-API-KEY", "X-Signature", "X-Timestamp"}
+	corsConfig.ExposeHeaders = []string{"Content-Length"}
+	corsConfig.AllowCredentials = true
+	r.Use(cors.New(corsConfig))
+
+	// 5. Setup Handlers
+	adminHandler := http.NewAdminHandler(db, cfg)
+
+	// 6. Setup Routes
+	v1 := r.Group("/v1")
+	{
+		// Auth
+		v1.POST("/admin/login", adminHandler.Login)
+
+		// CMS Routes
+		cms := v1.Group("/cms")
+		{
+			cms.POST("/merchants", adminHandler.CreateMerchant)
+			cms.GET("/merchants", adminHandler.GetMerchants)
+
+			cms.POST("/gateways", adminHandler.CreateGateway)
+			cms.GET("/gateways", adminHandler.GetGateways)
+		}
 	}
 
-	log.Println("✅ Berhasil koneksi ke database Supabase")
-
-	err = db.AutoMigrate(
-		&models.Merchant{},
-		&models.PaymentGateway{},
-		&models.Transaction{},
-		&models.Admin{},
-	)
-
-	if err != nil {
-		log.Printf("⚠️ Gagal migrasi otomatis: %v", err)
-	} else {
-		log.Println("✅ Tabel database siap digunakan")
-	}
-
-	// FIX: AUTO SEEDER UNTUK ADMIN PERTAMA KALI MENGGUNAKAN BCRYPT
-	var adminCount int64
-	db.Model(&models.Admin{}).Count(&adminCount)
-	if adminCount == 0 {
-		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("dupay123"), bcrypt.DefaultCost)
-		db.Create(&models.Admin{
-			Username: "admin",
-			Password: string(hashedPassword),
-		})
-		log.Println("🔑 Default Admin created! (Username: admin, Password: dupay123)")
-	}
-
-	return db
+	// 7. Jalankan Server
+	log.Println("🚀 Dupay Backend berjalan di port :8080")
+	r.Run(":8080")
 }

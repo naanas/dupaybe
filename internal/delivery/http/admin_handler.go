@@ -80,12 +80,14 @@ func (h *AdminHandler) GetGateways(c *gin.Context) {
 	c.JSON(http.StatusOK, gateways)
 }
 
-// --- FITUR MERCHANT DIUPDATE UNTUK IP WHITELIST ---
-
+// --- FITUR MERCHANT ---
 func (h *AdminHandler) CreateMerchant(c *gin.Context) {
 	var req struct {
 		Name           string `json:"name" binding:"required"`
-		WhitelistedIPs string `json:"whitelisted_ips"` // Optional: Bisa 1 IP atau dipisah koma (contoh: "192.168.1.1, 10.0.0.5")
+		Email          string `json:"email" binding:"required"`
+		Phone          string `json:"phone"`
+		PICName        string `json:"pic_name"`
+		WhitelistedIPs string `json:"whitelisted_ips"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -94,9 +96,12 @@ func (h *AdminHandler) CreateMerchant(c *gin.Context) {
 
 	merchant := models.Merchant{
 		Name:           req.Name,
+		Email:          req.Email,
+		Phone:          req.Phone,
+		PICName:        req.PICName,
 		APIKey:         "pk_" + uuid.New().String(),
 		SecretKey:      "sk_" + uuid.New().String(),
-		WhitelistedIPs: req.WhitelistedIPs, // Simpan ke database
+		WhitelistedIPs: req.WhitelistedIPs,
 		IsActive:       true,
 	}
 

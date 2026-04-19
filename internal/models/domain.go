@@ -6,9 +6,12 @@ import "time"
 type Merchant struct {
 	ID             string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
 	Name           string `json:"name" gorm:"unique;not null"`
+	Email          string `json:"email" gorm:"unique"` // BARU
+	Phone          string `json:"phone"`               // BARU
+	PICName        string `json:"pic_name"`            // BARU
 	APIKey         string `json:"api_key" gorm:"unique;not null;index"`
 	SecretKey      string `json:"secret_key" gorm:"not null"`
-	WhitelistedIPs string `json:"whitelisted_ips" gorm:"type:text"` // BARU: Menyimpan IP Address (dipisah koma)
+	WhitelistedIPs string `json:"whitelisted_ips" gorm:"type:text"`
 	IsActive       bool   `json:"is_active" gorm:"default:true"`
 }
 

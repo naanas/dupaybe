@@ -8,32 +8,20 @@ import (
 )
 
 type Config struct {
-	Port             string
-	GinMode          string
-	DatabaseURL      string
+	DBURL            string
 	AppEncryptionKey string
 }
 
-// LoadConfig membaca file .env dan mengembalikan struct Config
 func LoadConfig() *Config {
-	// Membaca file .env di root direktori
+	// Load variabel dari file .env (jika ada)
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("Warning: .env file not found. Using OS environment variables instead.")
+		log.Println("Warning: .env file not found, using system environment variables")
 	}
 
 	return &Config{
-		Port:             getEnv("PORT", "8080"),
-		GinMode:          getEnv("GIN_MODE", "debug"),
-		DatabaseURL:      getEnv("DATABASE_URL", ""),
-		AppEncryptionKey: getEnv("APP_ENCRYPTION_KEY", ""),
+		// Pastikan di file .env kamu ada variabel DATABASE_URL dan APP_ENCRYPTION_KEY
+		DBURL:            os.Getenv("DATABASE_URL"),
+		AppEncryptionKey: os.Getenv("APP_ENCRYPTION_KEY"),
 	}
-}
-
-// getEnv adalah fungsi helper untuk mengambil nilai env atau fallback ke nilai default
-func getEnv(key string, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
 }
