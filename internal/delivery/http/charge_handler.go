@@ -4,18 +4,18 @@ import (
 	"dupay/internal/models"
 	"dupay/internal/service"
 	"io"
-	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
 
+// FIX: Pastikan nama field-nya 'service' biar pemanggilannya (h.service) nggak error
 type ChargeHandler struct {
-	chargeService service.ChargeService
+	service service.ChargeService
 }
 
-func NewChargeHandler(cs service.ChargeService) *ChargeHandler {
-	return &ChargeHandler{chargeService: cs}
+func NewChargeHandler(s service.ChargeService) *ChargeHandler {
+	return &ChargeHandler{service: s}
 }
 
 func (h *ChargeHandler) CreateCharge(c *gin.Context) {
@@ -25,68 +25,54 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 		return
 	}
 
+	// Ambil merchant_id dari context (yang disuntik oleh APISecurityMiddleware)
+	merchantID := c.GetString("merchant_id")
 	idempotencyKey := c.GetHeader("X-Idempotency-Key")
 
-	merchantIDContext, exists := c.Get("merchant_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized access"})
-		return
-	}
-	merchantID := merchantIDContext.(string)
-
-	trx, err := h.chargeService.ProcessCharge(&req, idempotencyKey, merchantID)
+	trx, err := h.service.ProcessCharge(&req, idempotencyKey, merchantID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, models.ChargeResponse{
-		Status:  "success",
-		Message: "Charge routed and created successfully",
-		Data:    *trx,
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": "Charge routed successfully",
+		"data":    trx,
 	})
 }
 
 func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
-	transactionID := c.Param("id")
-
-	trx, err := h.chargeService.GetTransaction(transactionID)
+	id := c.Param("id")
+	trx, err := h.service.GetTransaction(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Transaction not found"})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"status": "success",
-		"data":   trx,
-	})
+	c.JSON(http.StatusOK, gin.H{"data": trx})
 }
 
 func (h *ChargeHandler) HandleWebhook(c *gin.Context) {
 	gatewayName := c.Param("gateway_name")
 
-	// FIX: MENGAMBIL HEADER KEAMANAN DARI PAYMENT GATEWAY
-	// Xendit biasanya menggunakan "X-Callback-Token", dll. Kita ambil beberapa fallback standar.
-	signature := c.GetHeader("X-Callback-Token")
+	// 1. Baca Raw Body (Ini yang akan di-hash HMAC)
+	payloadBytes, _ := io.ReadAll(c.Request.Body)
+	payloadStr := string(payloadBytes)
+
+	// 2. Cari signature dari Header (Tripay pakai X-Callback-Signature)
+	signature := c.GetHeader("X-Callback-Signature")
 	if signature == "" {
-		signature = c.GetHeader("X-Signature") // Bisa disesuaikan lagi jika butuh standard lain
+		// Fallback kalau gateway lain pakai nama header beda
+		signature = c.GetHeader("X-Signature")
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	// 3. Lempar ke Service untuk dicek keamanan dan diupdate statusnya
+	err := h.service.ProcessWebhook(gatewayName, payloadStr, signature)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Gagal membaca body payload"})
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 
-	payloadStr := string(bodyBytes)
-
-	// FIX: Oper signature ke service untuk divalidasi
-	err = h.chargeService.ProcessWebhook(gatewayName, payloadStr, signature)
-	if err != nil {
-		log.Printf("❌ Webhook Error [%s]: %v", gatewayName, err)
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()}) // 403 Forbidden
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "received"})
+	// 4. Wajib bales 200 OK pakai JSON sukses biar Tripay seneng
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }

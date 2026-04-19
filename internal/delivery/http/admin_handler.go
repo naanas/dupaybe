@@ -4,6 +4,7 @@ import (
 	"dupay/internal/config"
 	"dupay/internal/models"
 	"dupay/pkg/crypto"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -50,6 +51,9 @@ func (h *AdminHandler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": tokenString})
 }
 
+// ==========================================
+// GATEWAY MANAGEMENT (CMS)
+// ==========================================
 func (h *AdminHandler) CreateGateway(c *gin.Context) {
 	var pg models.PaymentGateway
 	if err := c.ShouldBindJSON(&pg); err != nil {
@@ -57,13 +61,33 @@ func (h *AdminHandler) CreateGateway(c *gin.Context) {
 		return
 	}
 
+	if pg.RequestTemplate == "" {
+		pg.RequestTemplate = "{}"
+	}
+	if pg.ResponseMapping == "" {
+		pg.ResponseMapping = "{}"
+	}
+	if pg.WebhookMapping == "" {
+		pg.WebhookMapping = "{}"
+	}
+
+	if !json.Valid([]byte(pg.RequestTemplate)) || !json.Valid([]byte(pg.WebhookMapping)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Format JSON Template/Mapping tidak valid."})
+		return
+	}
+
 	if pg.ServerKey != "" {
 		encryptedKey, err := crypto.EncryptAES([]byte(h.cfg.AppEncryptionKey), pg.ServerKey)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengenkripsi kredensial gateway"})
-			return
+		if err == nil {
+			pg.ServerKey = encryptedKey
 		}
-		pg.ServerKey = encryptedKey
+	}
+
+	if pg.PrivateKey != "" {
+		encryptedPriv, err := crypto.EncryptAES([]byte(h.cfg.AppEncryptionKey), pg.PrivateKey)
+		if err == nil {
+			pg.PrivateKey = encryptedPriv
+		}
 	}
 
 	if err := h.db.Create(&pg).Error; err != nil {
@@ -80,7 +104,55 @@ func (h *AdminHandler) GetGateways(c *gin.Context) {
 	c.JSON(http.StatusOK, gateways)
 }
 
-// --- FITUR MERCHANT ---
+func (h *AdminHandler) UpdateGateway(c *gin.Context) {
+	id := c.Param("id")
+	var pg models.PaymentGateway
+	if err := c.ShouldBindJSON(&pg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var existing models.PaymentGateway
+	if err := h.db.Where("id = ?", id).First(&existing).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Gateway tidak ditemukan"})
+		return
+	}
+
+	if pg.ServerKey != "" && pg.ServerKey != existing.ServerKey {
+		encryptedKey, _ := crypto.EncryptAES([]byte(h.cfg.AppEncryptionKey), pg.ServerKey)
+		pg.ServerKey = encryptedKey
+	} else {
+		pg.ServerKey = existing.ServerKey
+	}
+
+	if pg.PrivateKey != "" && pg.PrivateKey != existing.PrivateKey {
+		encryptedPriv, _ := crypto.EncryptAES([]byte(h.cfg.AppEncryptionKey), pg.PrivateKey)
+		pg.PrivateKey = encryptedPriv
+	} else {
+		pg.PrivateKey = existing.PrivateKey
+	}
+
+	pg.ID = id
+	if err := h.db.Save(&pg).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Gateway berhasil diupdate"})
+}
+
+func (h *AdminHandler) DeleteGateway(c *gin.Context) {
+	id := c.Param("id")
+	if err := h.db.Where("id = ?", id).Delete(&models.PaymentGateway{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Gateway berhasil dihapus"})
+}
+
+// ==========================================
+// MERCHANT MANAGEMENT (CMS)
+// ==========================================
 func (h *AdminHandler) CreateMerchant(c *gin.Context) {
 	var req struct {
 		Name           string `json:"name" binding:"required"`
@@ -109,7 +181,6 @@ func (h *AdminHandler) CreateMerchant(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"message": "Merchant berhasil dibuat", "data": merchant})
 }
 
@@ -118,11 +189,12 @@ func (h *AdminHandler) GetMerchants(c *gin.Context) {
 	h.db.Find(&merchants)
 	c.JSON(http.StatusOK, merchants)
 }
+
 func (h *AdminHandler) UpdateMerchant(c *gin.Context) {
 	id := c.Param("id")
 	var req struct {
-		Name           string `json:"name"`
-		Email          string `json:"email"`
+		Name           string `json:"name" binding:"required"`
+		Email          string `json:"email" binding:"required"`
 		Phone          string `json:"phone"`
 		PICName        string `json:"pic_name"`
 		WhitelistedIPs string `json:"whitelisted_ips"`
@@ -138,7 +210,6 @@ func (h *AdminHandler) UpdateMerchant(c *gin.Context) {
 		return
 	}
 
-	// Update data
 	merchant.Name = req.Name
 	merchant.Email = req.Email
 	merchant.Phone = req.Phone
@@ -149,7 +220,6 @@ func (h *AdminHandler) UpdateMerchant(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, gin.H{"message": "Merchant berhasil diupdate", "data": merchant})
 }
 

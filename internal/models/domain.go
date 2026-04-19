@@ -4,17 +4,15 @@ import "time"
 
 // --- CLIENT/MERCHANT SECTION ---
 type Merchant struct {
-	ID   string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
-	Name string `json:"name" gorm:"unique;not null"`
-
-	// FIX: Tambahkan column:business_email agar GORM tau nama kolom aslinya di database
-	Email string `json:"email" gorm:"column:business_email;unique;not null"`
-
+	ID             string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	Name           string `json:"name" gorm:"unique;not null"`
+	Email          string `json:"email" gorm:"unique"`
 	Phone          string `json:"phone"`
 	PICName        string `json:"pic_name"`
 	APIKey         string `json:"api_key" gorm:"unique;not null;index"`
 	SecretKey      string `json:"secret_key" gorm:"not null"`
 	WhitelistedIPs string `json:"whitelisted_ips" gorm:"type:text"`
+	WebhookURL     string `json:"webhook_url"`
 	IsActive       bool   `json:"is_active" gorm:"default:true"`
 }
 
@@ -48,13 +46,18 @@ type ChargeResponse struct {
 
 // --- ADMIN/CMS SECTION ---
 type PaymentGateway struct {
-	ID                    string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
-	Name                  string `json:"name" gorm:"unique"`
-	BaseURL               string `json:"base_url"`
-	ChargeEndpoint        string `json:"charge_endpoint"`
-	AuthType              string `json:"auth_type"`
-	CustomAuthHeader      string `json:"custom_auth_header"`
-	ServerKey             string `json:"server_key"`
+	ID               string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	Name             string `json:"name" gorm:"unique"`
+	BaseURL          string `json:"base_url"`
+	ChargeEndpoint   string `json:"charge_endpoint"`
+	AuthType         string `json:"auth_type"`
+	CustomAuthHeader string `json:"custom_auth_header"`
+
+	// CREDENTIALS ENCRYPTED
+	ServerKey    string `json:"server_key"`
+	MerchantCode string `json:"merchant_code"` // BARU
+	PrivateKey   string `json:"private_key"`   // BARU
+
 	RequestTemplate       string `json:"request_template" gorm:"type:jsonb"`
 	ResponseMapping       string `json:"response_mapping" gorm:"type:jsonb"`
 	WebhookMapping        string `json:"webhook_mapping" gorm:"type:jsonb"`
