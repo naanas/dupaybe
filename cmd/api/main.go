@@ -80,6 +80,9 @@ func main() {
 			cms.GET("/gateways", adminHandler.GetGateways)
 			cms.PUT("/gateways/:id", adminHandler.UpdateGateway)
 			cms.DELETE("/gateways/:id", adminHandler.DeleteGateway)
+
+			// Transactions monitoring
+			cms.GET("/transactions", adminHandler.GetTransactions)
 		}
 
 		// --- ROUTES WEBHOOK (DARI PAYMENT GATEWAY TARGET) ---

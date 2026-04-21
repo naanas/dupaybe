@@ -135,6 +135,8 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 
 	respBody, _ := io.ReadAll(resp.Body)
 	respStr := string(respBody)
+	clientPayloadBytes, _ := json.Marshal(req)
+	clientPayload := string(clientPayloadBytes)
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): %s", pg.Name, resp.StatusCode, respStr)
@@ -159,6 +161,9 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		Status:           "PENDING",
 		PGReferenceID:    pgRefID,
 		CheckoutURL:      checkoutURL,
+		ClientPayload:    clientPayload,
+		PGResponse:       respStr,
+		PGStatusCode:     resp.StatusCode,
 		CreatedAt:        time.Now(),
 	}
 

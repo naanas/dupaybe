@@ -20,6 +20,24 @@ type AdminHandler struct {
 	cfg *config.Config
 }
 
+type CMSTransactionItem struct {
+	ID             string    `json:"id"`
+	OrderID        string    `json:"order_id"`
+	MerchantID     string    `json:"merchant_id"`
+	MerchantName   string    `json:"merchant_name"`
+	GatewayID      string    `json:"gateway_id"`
+	GatewayName    string    `json:"gateway_name"`
+	Amount         float64   `json:"amount"`
+	PaymentMethod  string    `json:"payment_method"`
+	Status         string    `json:"status"`
+	PGReferenceID  string    `json:"pg_reference_id"`
+	CheckoutURL    string    `json:"checkout_url"`
+	ClientPayload  string    `json:"client_payload"`
+	PGResponse     string    `json:"pg_response"`
+	PGStatusCode   int       `json:"pg_status_code"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 func NewAdminHandler(db *gorm.DB, cfg *config.Config) *AdminHandler {
 	return &AdminHandler{db: db, cfg: cfg}
 }
@@ -148,6 +166,41 @@ func (h *AdminHandler) DeleteGateway(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Gateway berhasil dihapus"})
+}
+
+func (h *AdminHandler) GetTransactions(c *gin.Context) {
+	limit := 100
+	var transactions []CMSTransactionItem
+
+	if err := h.db.
+		Table("transactions t").
+		Select(`
+			t.id,
+			t.order_id,
+			t.merchant_id,
+			COALESCE(m.name, '') as merchant_name,
+			t.payment_gateway_id as gateway_id,
+			COALESCE(pg.name, '') as gateway_name,
+			t.amount,
+			t.payment_method,
+			t.status,
+			t.pg_reference_id,
+			t.checkout_url,
+			t.client_payload,
+			t.pg_response,
+			t.pg_status_code,
+			t.created_at
+		`).
+		Joins("LEFT JOIN merchants m ON m.id = t.merchant_id").
+		Joins("LEFT JOIN payment_gateways pg ON pg.id = t.payment_gateway_id").
+		Order("t.created_at DESC").
+		Limit(limit).
+		Scan(&transactions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, transactions)
 }
 
 // ==========================================

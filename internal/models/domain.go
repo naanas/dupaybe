@@ -35,6 +35,9 @@ type Transaction struct {
 	Status           string    `json:"status" gorm:"type:varchar(50)"`
 	PGReferenceID    string    `json:"pg_reference_id" gorm:"type:varchar(255)"`
 	CheckoutURL      string    `json:"checkout_url,omitempty" gorm:"type:text"`
+	ClientPayload    string    `json:"client_payload,omitempty" gorm:"type:text"`
+	PGResponse       string    `json:"pg_response,omitempty" gorm:"type:text"`
+	PGStatusCode     int       `json:"pg_status_code" gorm:"default:0"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 
