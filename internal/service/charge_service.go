@@ -150,6 +150,10 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	clientPayload := string(clientPayloadBytes)
 
 	if resp.StatusCode >= 400 {
+		lowerResp := strings.ToLower(respStr)
+		if strings.Contains(lowerResp, "whitelist") || (strings.Contains(lowerResp, "ip") && strings.Contains(lowerResp, "allow")) {
+			return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): indikasi IP belum di-whitelist di Payment Gateway. Tambahkan IP server Dupay ke whitelist di dashboard PG. Detail: %s", pg.Name, resp.StatusCode, respStr)
+		}
 		return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): %s", pg.Name, resp.StatusCode, respStr)
 	}
 
@@ -175,6 +179,7 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	pgRefID := extract(responseMapping["pg_transaction_id"])
 	checkoutURL := extract(responseMapping["checkout_url"])
 	paymentCode := extract(responseMapping["payment_code"])
+	paymentDeeplink := extract(responseMapping["payment_deeplink"])
 
 	// Defensive fallback: kalau response_mapping belum diset benar di CMS,
 	// tetap coba ambil field umum dari provider (Tripay, dll) sebelum fallback ke checkout URL.
@@ -183,6 +188,9 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	}
 	if checkoutURL == "" {
 		checkoutURL = extract("data.checkout_url|checkout_url|data.payment_url|payment_url")
+	}
+	if paymentDeeplink == "" {
+		paymentDeeplink = extract("data.deeplink_url|data.deeplink|data.deep_link|deeplink_url|deeplink|deep_link")
 	}
 
 	trx := &models.Transaction{
@@ -197,6 +205,7 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		PGReferenceID:    pgRefID,
 		CheckoutURL:      checkoutURL,
 		PaymentCode:      paymentCode,
+		PaymentDeeplink:  paymentDeeplink,
 		ClientPayload:    clientPayload,
 		PGResponse:       respStr,
 		PGStatusCode:     resp.StatusCode,

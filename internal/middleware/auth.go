@@ -48,7 +48,7 @@ func APISecurityMiddleware(db *gorm.DB) gin.HandlerFunc {
 			// Tolak jika IP tidak terdaftar
 			if !isAllowed {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-					"error": "FORBIDDEN: Alamat IP Anda (" + clientIP + ") tidak diizinkan untuk mengakses API Key ini",
+					"error": "FORBIDDEN: Alamat IP Anda (" + clientIP + ") tidak diizinkan untuk API Key ini. Tambahkan IP ini ke whitelist merchant di Dupay CMS (Whitelisted IPs).",
 				})
 				return
 			}
