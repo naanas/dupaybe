@@ -176,6 +176,15 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	checkoutURL := extract(responseMapping["checkout_url"])
 	paymentCode := extract(responseMapping["payment_code"])
 
+	// Defensive fallback: kalau response_mapping belum diset benar di CMS,
+	// tetap coba ambil field umum dari provider (Tripay, dll) sebelum fallback ke checkout URL.
+	if paymentCode == "" {
+		paymentCode = extract("data.pay_code|data.qr_string|data.qr_url|pay_code|qr_string|qr_url")
+	}
+	if checkoutURL == "" {
+		checkoutURL = extract("data.checkout_url|checkout_url|data.payment_url|payment_url")
+	}
+
 	trx := &models.Transaction{
 		ID:               uuid.New().String(),
 		MerchantID:       merchantID,
