@@ -7,6 +7,7 @@ import (
 	"dupay/internal/models"
 	"dupay/internal/service" // TAMBAHAN
 	"log"
+	"os"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -100,8 +101,14 @@ func main() {
 	}
 
 	// 9. Jalankan Server
-	log.Println("🚀 Dupay Backend berjalan di port :8080")
-	r.Run(":8080")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("🚀 Dupay Backend berjalan di port :%s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("gagal menjalankan server: %v", err)
+	}
 }
 
 // Fungsi helper untuk membuat admin default
