@@ -8,6 +8,7 @@ import (
 	"dupay/internal/service" // TAMBAHAN
 	"log"
 	"os"
+	"strings"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -42,7 +43,7 @@ func main() {
 
 	// 6. KONFIGURASI CORS
 	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
+	corsConfig.AllowOrigins = getAllowedOrigins()
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Authorization", "X-API-KEY", "X-Signature", "X-Timestamp", "X-Idempotency-Key"}
 	corsConfig.ExposeHeaders = []string{"Content-Length"}
@@ -109,6 +110,33 @@ func main() {
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("gagal menjalankan server: %v", err)
 	}
+}
+
+func getAllowedOrigins() []string {
+	originsEnv := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if originsEnv == "" {
+		return []string{
+			"http://localhost:3000",
+			"http://127.0.0.1:3000",
+			"https://dupay-cms.vercel.app",
+		}
+	}
+
+	parts := strings.Split(originsEnv, ",")
+	origins := make([]string, 0, len(parts))
+	for _, origin := range parts {
+		trimmed := strings.TrimSpace(origin)
+		if trimmed != "" {
+			origins = append(origins, trimmed)
+		}
+	}
+
+	// fallback aman kalau env tidak valid
+	if len(origins) == 0 {
+		return []string{"http://localhost:3000", "http://127.0.0.1:3000", "https://dupay-cms.vercel.app"}
+	}
+
+	return origins
 }
 
 // Fungsi helper untuk membuat admin default
