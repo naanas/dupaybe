@@ -213,6 +213,7 @@ func (h *AdminHandler) CreateMerchant(c *gin.Context) {
 		Phone          string `json:"phone"`
 		PICName        string `json:"pic_name"`
 		WhitelistedIPs string `json:"whitelisted_ips"`
+		WebhookURL     string `json:"webhook_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -227,6 +228,7 @@ func (h *AdminHandler) CreateMerchant(c *gin.Context) {
 		APIKey:         "pk_" + uuid.New().String(),
 		SecretKey:      "sk_" + uuid.New().String(),
 		WhitelistedIPs: req.WhitelistedIPs,
+		WebhookURL:     req.WebhookURL,
 		IsActive:       true,
 	}
 
@@ -251,6 +253,7 @@ func (h *AdminHandler) UpdateMerchant(c *gin.Context) {
 		Phone          string `json:"phone"`
 		PICName        string `json:"pic_name"`
 		WhitelistedIPs string `json:"whitelisted_ips"`
+		WebhookURL     string `json:"webhook_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -268,6 +271,7 @@ func (h *AdminHandler) UpdateMerchant(c *gin.Context) {
 	merchant.Phone = req.Phone
 	merchant.PICName = req.PICName
 	merchant.WhitelistedIPs = req.WhitelistedIPs
+	merchant.WebhookURL = req.WebhookURL
 
 	if err := h.db.Save(&merchant).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

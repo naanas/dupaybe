@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -293,14 +294,17 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 func (s *chargeService) forwardWebhookToMerchant(orderID string, gatewayID string) {
 	var trx models.Transaction
 	if err := s.db.Where("order_id = ? AND payment_gateway_id = ?", orderID, gatewayID).First(&trx).Error; err != nil {
+		log.Printf("[WEBHOOK-FWD] transaksi tidak ditemukan for order_id=%s gateway_id=%s: %v", orderID, gatewayID, err)
 		return
 	}
 
 	var merchant models.Merchant
 	if err := s.db.Where("id = ?", trx.MerchantID).First(&merchant).Error; err != nil {
+		log.Printf("[WEBHOOK-FWD] merchant tidak ditemukan id=%s: %v", trx.MerchantID, err)
 		return
 	}
 	if merchant.WebhookURL == "" {
+		log.Printf("[WEBHOOK-FWD] skip order_id=%s karena webhook_url merchant kosong", trx.OrderID)
 		return
 	}
 
@@ -320,5 +324,18 @@ func (s *chargeService) forwardWebhookToMerchant(orderID string, gatewayID strin
 	httpReq.Header.Set("X-Dupay-Signature", signature)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	client.Do(httpReq)
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		log.Printf("[WEBHOOK-FWD] gagal kirim ke merchant url=%s order_id=%s: %v", merchant.WebhookURL, trx.OrderID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[WEBHOOK-FWD] merchant callback non-2xx status=%d order_id=%s body=%s", resp.StatusCode, trx.OrderID, string(respBody))
+		return
+	}
+
+	log.Printf("[WEBHOOK-FWD] sukses kirim callback ke merchant order_id=%s status=%s", trx.OrderID, trx.Status)
 }
