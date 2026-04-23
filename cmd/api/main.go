@@ -91,6 +91,12 @@ func main() {
 		// Nggak dipasang middleware Auth karena ditembak oleh sistem luar (Tripay/Midtrans)
 		v1.POST("/webhook/:gateway_name", chargeHandler.HandleWebhook)
 
+		// --- ROUTES PUBLIC (TANPA AUTH) ---
+		// Endpoint untuk fetch daftar channel aktif sebuah gateway.
+		// Sengaja public supaya bisa di-cache CDN, dan dipanggil langsung dari browser.
+		// Path dipisah dari /charge biar nggak konflik sama /charge/:id yang butuh auth.
+		v1.GET("/channels", chargeHandler.GetChannels)
+
 		// --- ROUTES CLIENT API (TRANSAKSI) ---
 		// WAJIB pake APISecurityMiddleware (Verifikasi X-API-KEY & HMAC Signature)
 		clientAPI := v1.Group("/charge")

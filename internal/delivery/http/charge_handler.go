@@ -52,6 +52,25 @@ func (h *ChargeHandler) GetChargeStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": trx})
 }
 
+// GetChannels mengembalikan daftar channel AKTIF untuk gateway tertentu.
+// Public endpoint (tanpa auth) — dipake frontend buat render dynamic payment options.
+//
+// Contoh: GET /v1/charge/channels?gateway=TripayProd
+func (h *ChargeHandler) GetChannels(c *gin.Context) {
+	gatewayName := c.Query("gateway")
+
+	channels, err := h.service.GetPublicChannels(gatewayName)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "success",
+		"data":   channels,
+	})
+}
+
 func (h *ChargeHandler) HandleWebhook(c *gin.Context) {
 	gatewayName := c.Param("gateway_name")
 

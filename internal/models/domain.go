@@ -65,6 +65,7 @@ type PaymentGateway struct {
 	RequestTemplate       string `json:"request_template" gorm:"type:jsonb"`
 	ResponseMapping       string `json:"response_mapping" gorm:"type:jsonb"`
 	WebhookMapping        string `json:"webhook_mapping" gorm:"type:jsonb"`
+	ChannelMapping        string `json:"channel_mapping" gorm:"type:jsonb"`
 	WebhookSecret         string `json:"webhook_secret"`
 	WebhookValidationType string `json:"webhook_validation_type"`
 	IsActive              bool   `json:"is_active" gorm:"default:true"`

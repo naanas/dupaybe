@@ -28,6 +28,7 @@ type ChargeService interface {
 	GetTransaction(id string) (*models.Transaction, error)
 	UpdateStatus(orderID string, status string, gatewayID string) error
 	ProcessWebhook(gatewayName string, payload string, webhookSignature string) error
+	GetPublicChannels(gatewayName string) ([]ChannelInfo, error)
 }
 
 type chargeService struct {
@@ -54,9 +55,18 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		return nil, fmt.Errorf("payment gateway %s tidak ditemukan", req.GatewayName)
 	}
 
+	// Channel Mapping: translate kode internal client (mis. "bca", "qris") ke kode PG
+	// (mis. "BCAVA", "QRIS"). Support 2 format: array of object (baru) atau object KV (lama).
+	// Fallback: kalau lookup ga ketemu, pake raw value (lowercase).
+	methodCode := strings.ToLower(strings.TrimSpace(req.PaymentMethod))
+	_, lookup := ParseChannels(pg.ChannelMapping)
+	if v, ok := lookup[methodCode]; ok && v != "" {
+		methodCode = v
+	}
+
 	payloadStr := pg.RequestTemplate
 	payloadStr = strings.ReplaceAll(payloadStr, "{{order_id}}", req.OrderID)
-	payloadStr = strings.ReplaceAll(payloadStr, "{{payment_method}}", strings.ToLower(req.PaymentMethod))
+	payloadStr = strings.ReplaceAll(payloadStr, "{{payment_method}}", methodCode)
 	payloadStr = strings.ReplaceAll(payloadStr, "\"{{amount}}\"", fmt.Sprintf("%.0f", req.Amount))
 
 	decryptedServerKey := ""
@@ -189,6 +199,35 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 	}
 
 	return trx, nil
+}
+
+// GetPublicChannels mengembalikan daftar channel AKTIF buat sebuah gateway.
+// Ini di-expose lewat endpoint public (tanpa auth) supaya frontend bisa render
+// list metode pembayaran dinamis tanpa hardcoded.
+//
+// Field sensitif (PGCode) dihilangkan sebelum di-return, supaya kode internal PG
+// nggak bocor ke publik. Frontend cukup pake `code` yang dia kirim balik saat charge,
+// dan orchestrator yang terjemahin ke PGCode lewat channel_mapping.
+func (s *chargeService) GetPublicChannels(gatewayName string) ([]ChannelInfo, error) {
+	var pg models.PaymentGateway
+	q := s.db.Where("is_active = ?", true)
+	if gatewayName != "" {
+		q = q.Where("LOWER(name) = LOWER(?)", gatewayName)
+	}
+	if err := q.First(&pg).Error; err != nil {
+		return nil, fmt.Errorf("gateway tidak ditemukan atau tidak aktif")
+	}
+
+	all, _ := ParseChannels(pg.ChannelMapping)
+	active := ActiveChannels(all)
+
+	// Sanitasi: hilangkan pg_code dari response publik.
+	out := make([]ChannelInfo, 0, len(active))
+	for _, ch := range active {
+		ch.PGCode = ""
+		out = append(out, ch)
+	}
+	return out, nil
 }
 
 func (s *chargeService) GetTransaction(id string) (*models.Transaction, error) {
