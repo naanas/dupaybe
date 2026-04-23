@@ -148,8 +148,23 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		json.Unmarshal([]byte(pg.ResponseMapping), &responseMapping)
 	}
 
-	pgRefID := gjson.Get(respStr, responseMapping["pg_transaction_id"]).String()
-	checkoutURL := gjson.Get(respStr, responseMapping["checkout_url"]).String()
+	// Helper: support pipe-separated fallback paths.
+	// Contoh: "data.pay_code|data.qr_string|data.qr_url" -> ambil value pertama yang non-empty.
+	extract := func(paths string) string {
+		if paths == "" {
+			return ""
+		}
+		for _, p := range strings.Split(paths, "|") {
+			if v := gjson.Get(respStr, strings.TrimSpace(p)).String(); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	pgRefID := extract(responseMapping["pg_transaction_id"])
+	checkoutURL := extract(responseMapping["checkout_url"])
+	paymentCode := extract(responseMapping["payment_code"])
 
 	trx := &models.Transaction{
 		ID:               uuid.New().String(),
@@ -162,6 +177,7 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		Status:           "PENDING",
 		PGReferenceID:    pgRefID,
 		CheckoutURL:      checkoutURL,
+		PaymentCode:      paymentCode,
 		ClientPayload:    clientPayload,
 		PGResponse:       respStr,
 		PGStatusCode:     resp.StatusCode,
