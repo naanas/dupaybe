@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -51,6 +52,20 @@ func main() {
 	r.Use(cors.New(corsConfig))
 
 	r.Use(middleware.APILogger())
+
+	// Health endpoints (public) untuk uptime checks dari LB/monitoring.
+	r.GET("/health", func(c *gin.Context) {
+		dbStatus := "ok"
+		if err := db.Exec("SELECT 1").Error; err != nil {
+			dbStatus = "degraded"
+		}
+		c.JSON(200, gin.H{
+			"status":    "ok",
+			"service":   "dupaybe",
+			"db_status": dbStatus,
+			"time":      time.Now().UTC().Format(time.RFC3339),
+		})
+	})
 	// ==========================================
 	// 7. SETUP SERVICES & HANDLERS
 	// ==========================================
@@ -67,6 +82,19 @@ func main() {
 	// ==========================================
 	v1 := r.Group("/v1")
 	{
+		v1.GET("/health", func(c *gin.Context) {
+			dbStatus := "ok"
+			if err := db.Exec("SELECT 1").Error; err != nil {
+				dbStatus = "degraded"
+			}
+			c.JSON(200, gin.H{
+				"status":    "ok",
+				"service":   "dupaybe",
+				"db_status": dbStatus,
+				"time":      time.Now().UTC().Format(time.RFC3339),
+			})
+		})
+
 		// --- ROUTES CMS (BACKOFFICE) ---
 		v1.POST("/admin/login", adminHandler.Login)
 		cms := v1.Group("/cms")
