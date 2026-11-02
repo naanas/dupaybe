@@ -5,6 +5,7 @@ import (
 	"dupay/internal/delivery/http"
 	"dupay/internal/middleware" // TAMBAHAN
 	"dupay/internal/models"
+	"dupay/internal/repository"
 	"dupay/internal/service" // TAMBAHAN
 	"log"
 	"os"
@@ -29,11 +30,16 @@ func main() {
 	}
 
 	// 3. Auto Migrate
+	if err := repository.EnsureUserRoleColumn(db); err != nil {
+		log.Printf("Gagal nambah kolom users.role: %v", err)
+	}
 	db.AutoMigrate(
 		&models.Merchant{},
 		&models.PaymentGateway{},
+		&models.GatewayEndpoint{},
+		&models.DisabledPaymentMethod{},
 		&models.Transaction{},
-		&models.Admin{},
+		&models.User{},
 	)
 
 	// 4. Seed Default Admin
@@ -76,6 +82,7 @@ func main() {
 	// Client (Charge & Webhook) - INI YANG KETINGGALAN TADI!
 	chargeService := service.NewChargeService(db, cfg)
 	chargeHandler := http.NewChargeHandler(chargeService)
+	merchantPortal := http.NewMerchantPortalHandler(db, chargeService)
 
 	// ==========================================
 	// 8. SETUP ROUTES
@@ -96,23 +103,49 @@ func main() {
 		})
 
 		// --- ROUTES CMS (BACKOFFICE) ---
+		// Login CMS buat admin & merchant (role ada di token). /admin/login = path lama.
+		v1.POST("/auth/login", adminHandler.Login)
 		v1.POST("/admin/login", adminHandler.Login)
-		cms := v1.Group("/cms")
+		v1.POST("/auth/register", adminHandler.Register)
+		jwtAuth := middleware.JWTAuthMiddleware(cfg.JWTSecret)
+		v1.PUT("/auth/password", jwtAuth, http.ChangePassword(db))
+
+		// Khusus admin: setting gateway, merchant, & semua transaksi.
+		cms := v1.Group("/cms", jwtAuth, middleware.RequireRole(models.RoleAdmin))
 		{
 			// Merchants
 			cms.POST("/merchants", adminHandler.CreateMerchant)
 			cms.GET("/merchants", adminHandler.GetMerchants)
 			cms.PUT("/merchants/:id", adminHandler.UpdateMerchant)
 			cms.DELETE("/merchants/:id", adminHandler.DeleteMerchant)
+			cms.PUT("/merchants/:id/login", adminHandler.SetMerchantLogin)
+			cms.DELETE("/merchants/:id/login", adminHandler.DeleteMerchantLogin)
+			cms.PUT("/merchants/:id/active", adminHandler.SetMerchantActive)
 
 			// Gateways
 			cms.POST("/gateways", adminHandler.CreateGateway)
 			cms.GET("/gateways", adminHandler.GetGateways)
 			cms.PUT("/gateways/:id", adminHandler.UpdateGateway)
 			cms.DELETE("/gateways/:id", adminHandler.DeleteGateway)
+			cms.POST("/gateways/fetch-channels", chargeHandler.FetchGatewayChannels)
+			cms.POST("/gateways/test-endpoint", chargeHandler.TestGatewayEndpoint)
+			cms.GET("/payment-methods/disabled", adminHandler.GetDisabledPaymentMethods)
+			cms.PUT("/payment-methods/:code", adminHandler.SetPaymentMethodActive)
 
 			// Transactions monitoring
 			cms.GET("/transactions", adminHandler.GetTransactions)
+			cms.POST("/transactions/:id/sync", chargeHandler.SyncTransactionCMS)
+		}
+
+		// Portal merchant: cuma data merchant yang login, tanpa info payment gateway.
+		merchantAPI := v1.Group("/merchant", jwtAuth, middleware.RequireRole(models.RoleMerchant), middleware.LoadMerchant(db))
+		{
+			merchantAPI.GET("/me", merchantPortal.GetProfile)
+			merchantAPI.PUT("/me", merchantPortal.UpdateProfile)
+			merchantAPI.POST("/me/rotate-secret", merchantPortal.RotateSecret)
+			merchantAPI.GET("/summary", merchantPortal.GetSummary)
+			merchantAPI.GET("/transactions", merchantPortal.GetTransactions)
+			merchantAPI.POST("/transactions/:id/sync", merchantPortal.SyncTransaction)
 		}
 
 		// --- ROUTES WEBHOOK (DARI PAYMENT GATEWAY TARGET) ---
@@ -130,8 +163,9 @@ func main() {
 		clientAPI := v1.Group("/charge")
 		clientAPI.Use(middleware.APISecurityMiddleware(db))
 		{
-			clientAPI.POST("", chargeHandler.CreateCharge)       // POST /v1/charge
-			clientAPI.GET("/:id", chargeHandler.GetChargeStatus) // GET /v1/charge/:id
+			clientAPI.POST("", chargeHandler.CreateCharge)              // POST /v1/charge
+			clientAPI.GET("/:id", chargeHandler.GetChargeStatus)        // GET /v1/charge/:id
+			clientAPI.POST("/:id/sync", chargeHandler.SyncChargeStatus) // POST /v1/charge/:id/sync
 		}
 	}
 
@@ -176,12 +210,13 @@ func getAllowedOrigins() []string {
 // Fungsi helper untuk membuat admin default
 func seedAdmin(db *gorm.DB) {
 	var count int64
-	db.Model(&models.Admin{}).Count(&count)
+	db.Model(&models.User{}).Count(&count)
 	if count == 0 {
 		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("dupay123"), bcrypt.DefaultCost)
-		db.Create(&models.Admin{
+		db.Create(&models.User{
 			Username: "admin",
 			Password: string(hashedPassword),
+			Role:     models.RoleAdmin,
 		})
 		log.Println("🔑 Default Admin created! (Username: admin, Password: dupay123)")
 	}

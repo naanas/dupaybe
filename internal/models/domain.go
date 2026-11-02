@@ -21,7 +21,7 @@ type ChargeRequest struct {
 	Amount        float64 `json:"amount" binding:"required,gt=0"`
 	Currency      string  `json:"currency" binding:"required"`
 	PaymentMethod string  `json:"payment_method" binding:"required"`
-	GatewayName   string  `json:"gateway_name" binding:"required"`
+	GatewayName   string  `json:"gateway_name"` // opsional; kosong = Dupay yang milih gateway (lihat PaymentGateway.Priority)
 }
 
 type Transaction struct {
@@ -70,15 +70,59 @@ type PaymentGateway struct {
 	WebhookSecret         string `json:"webhook_secret"`
 	WebhookValidationType string `json:"webhook_validation_type"`
 	IsActive              bool   `json:"is_active" gorm:"default:true"`
+	// Urutan pemilihan gateway kalau merchant nggak nyebut gateway_name: angka kecil dipakai duluan.
+	Priority int `json:"priority" gorm:"not null"`
+
+	// Endpoint per aksi (charge/status), bisa dibedain per jenis channel.
+	// ChargeEndpoint/RequestTemplate/ResponseMapping di atas = format lama, cuma dipakai
+	// sebagai fallback kalau gateway belum punya endpoint charge.
+	Endpoints []GatewayEndpoint `json:"endpoints" gorm:"foreignKey:GatewayID;constraint:OnDelete:CASCADE"`
 }
 
-type Admin struct {
+const (
+	EndpointActionCharge   = "charge"
+	EndpointActionStatus   = "status"
+	EndpointActionChannels = "channels" // daftar channel dari PG, buat isi channel_mapping otomatis
+)
+
+type GatewayEndpoint struct {
+	ID        string `json:"id" gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
+	GatewayID string `json:"gateway_id" gorm:"type:uuid;not null;uniqueIndex:idx_gateway_endpoints_unique,where:action <> '';uniqueIndex:idx_gateway_endpoints_name"`
+	Name      string `json:"name" gorm:"type:varchar(100);not null;default:'';uniqueIndex:idx_gateway_endpoints_name"` // nama bebas, unik per gateway
+	// Action = endpoint ini dipakai otomatis buat apa: charge | status | channels, atau "" (custom, cuma disimpan & bisa dites dari CMS).
+	Action          string    `json:"action" gorm:"type:varchar(20);not null;default:'';uniqueIndex:idx_gateway_endpoints_unique"`
+	ChannelMethod   string    `json:"channel_method" gorm:"type:varchar(20);not null;default:'';uniqueIndex:idx_gateway_endpoints_unique"` // "" = semua channel, atau va|qris|ewallet|cstore
+	HTTPMethod      string    `json:"http_method" gorm:"type:varchar(10);not null"`                                                        // GET | POST
+	Path            string    `json:"path" gorm:"type:text;not null"`
+	RequestTemplate string    `json:"request_template" gorm:"type:text"`
+	ResponseMapping string    `json:"response_mapping" gorm:"type:text"`
+	IsActive        bool      `json:"is_active" gorm:"not null"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+const (
+	RoleAdmin    = "admin"    // ngatur semua: gateway, merchant, transaksi
+	RoleMerchant = "merchant" // cuma lihat data merchant-nya sendiri, nggak bisa lihat setting PG
+)
+
+type User struct {
 	ID       string `gorm:"primaryKey;type:uuid;default:uuid_generate_v4()"`
 	Username string `gorm:"unique"`
 	Password string `json:"-"`
+	Role     string `gorm:"type:varchar(20);not null"`
+	// Wajib diisi kalau Role = merchant. Satu merchant maksimal satu akun login.
+	MerchantID *string `gorm:"type:uuid;uniqueIndex:idx_users_merchant_id"`
 }
 
 type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
+}
+
+// DisabledPaymentMethod = metode bayar (kode merchant, mis. "bri") yang dimatiin admin buat semua gateway.
+// Nggak ada baris = aktif. Setting channel per gateway nggak diubah, jadi pas dinyalain lagi balik kayak semula.
+type DisabledPaymentMethod struct {
+	Code      string    `json:"code" gorm:"primaryKey;type:varchar(50)"`
+	CreatedAt time.Time `json:"created_at"`
 }

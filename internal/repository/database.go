@@ -25,11 +25,17 @@ func InitDB(cfg *config.Config) *gorm.DB {
 
 	log.Println("✅ Berhasil koneksi ke database Supabase")
 
+	if err := EnsureUserRoleColumn(db); err != nil {
+		log.Printf("⚠️ Gagal nambah kolom users.role: %v", err)
+	}
+
 	err = db.AutoMigrate(
 		&models.Merchant{},
 		&models.PaymentGateway{},
+		&models.GatewayEndpoint{},
+		&models.DisabledPaymentMethod{},
 		&models.Transaction{},
-		&models.Admin{},
+		&models.User{},
 	)
 
 	if err != nil {
@@ -40,12 +46,13 @@ func InitDB(cfg *config.Config) *gorm.DB {
 
 	// FIX: AUTO SEEDER UNTUK ADMIN PERTAMA KALI MENGGUNAKAN BCRYPT
 	var adminCount int64
-	db.Model(&models.Admin{}).Count(&adminCount)
+	db.Model(&models.User{}).Count(&adminCount)
 	if adminCount == 0 {
 		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("dupay123"), bcrypt.DefaultCost)
-		db.Create(&models.Admin{
+		db.Create(&models.User{
 			Username: "admin",
 			Password: string(hashedPassword),
+			Role:     models.RoleAdmin,
 		})
 		log.Println("🔑 Default Admin created! (Username: admin, Password: dupay123)")
 	}

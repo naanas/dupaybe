@@ -2,12 +2,9 @@ package service
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
 	"dupay/internal/config"
 	"dupay/internal/models"
 	"dupay/pkg/crypto"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +25,9 @@ type ChargeService interface {
 	GetTransaction(id string) (*models.Transaction, error)
 	UpdateStatus(orderID string, status string, gatewayID string) error
 	ProcessWebhook(gatewayName string, payload string, webhookSignature string) error
+	SyncStatus(id string, merchantID string) (*models.Transaction, string, error)
+	FetchPGChannels(draft models.PaymentGateway) ([]ChannelSyncItem, error)
+	TestEndpoint(draft models.PaymentGateway, ep models.GatewayEndpoint, in EndpointTestInput) (*EndpointTestResult, error)
 	GetPublicChannels(gatewayName string) ([]ChannelInfo, error)
 }
 
@@ -50,131 +50,62 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		return &existingTrx, nil
 	}
 
+	if s.disabledMethods()[strings.ToLower(strings.TrimSpace(req.PaymentMethod))] {
+		return nil, fmt.Errorf("metode bayar %s nggak tersedia", req.PaymentMethod)
+	}
+
+	// Merchant cukup kirim metode bayar; gateway dipilih Dupay. gateway_name cuma buat maksa gateway tertentu.
 	var pg models.PaymentGateway
-	if err := s.db.Where("name = ? AND is_active = ?", req.GatewayName, true).First(&pg).Error; err != nil {
-		return nil, fmt.Errorf("payment gateway %s tidak ditemukan", req.GatewayName)
+	if req.GatewayName != "" {
+		if err := s.db.Preload("Endpoints").Where("name = ? AND is_active = ?", req.GatewayName, true).First(&pg).Error; err != nil {
+			return nil, fmt.Errorf("payment gateway %s tidak ditemukan", req.GatewayName)
+		}
+	} else {
+		picked, err := s.pickGateway(req.PaymentMethod, req.Amount)
+		if err != nil {
+			return nil, err
+		}
+		pg = *picked
 	}
 
 	// Channel Mapping: translate kode internal client (mis. "bca", "qris") ke kode PG
-	// (mis. "BCAVA", "QRIS"). Support 2 format: array of object (baru) atau object KV (lama).
-	// Fallback: kalau lookup ga ketemu, pake raw value (lowercase).
-	methodCode := strings.ToLower(strings.TrimSpace(req.PaymentMethod))
-	_, lookup := ParseChannels(pg.ChannelMapping)
-	if v, ok := lookup[methodCode]; ok && v != "" {
-		methodCode = v
+	// (mis. "BCAVA", "QRIS"), sekaligus ambil jenis channel-nya (va/qris/...) buat milih endpoint.
+	// Fallback: kalau lookup ga ketemu, pake raw value apa adanya.
+	methodCode, channelMethod := findChannel(&pg, req.PaymentMethod)
+
+	ep := resolveEndpoint(&pg, models.EndpointActionCharge, channelMethod)
+	if ep == nil {
+		return nil, fmt.Errorf("gateway %s belum punya endpoint charge yang aktif", pg.Name)
 	}
 
-	payloadStr := pg.RequestTemplate
-	payloadStr = strings.ReplaceAll(payloadStr, "{{order_id}}", req.OrderID)
-	payloadStr = strings.ReplaceAll(payloadStr, "{{payment_method}}", methodCode)
-	payloadStr = strings.ReplaceAll(payloadStr, "\"{{amount}}\"", fmt.Sprintf("%.0f", req.Amount))
-
-	decryptedServerKey := ""
-	if pg.ServerKey != "" {
-		key, _ := crypto.DecryptAES([]byte(s.cfg.AppEncryptionKey), pg.ServerKey)
-		decryptedServerKey = key
-	}
-
-	decryptedPrivateKey := ""
-	if pg.PrivateKey != "" {
-		key, _ := crypto.DecryptAES([]byte(s.cfg.AppEncryptionKey), pg.PrivateKey)
-		decryptedPrivateKey = key
-	}
-
-	targetURL := strings.TrimSuffix(pg.BaseURL, "/") + "/" + strings.TrimPrefix(pg.ChargeEndpoint, "/")
-	httpReq, err := http.NewRequest("POST", targetURL, bytes.NewBuffer([]byte(payloadStr)))
+	res, err := s.callGateway(&pg, ep, pgCallVars{
+		OrderID:       req.OrderID,
+		Amount:        req.Amount,
+		PaymentMethod: methodCode,
+		MerchantCode:  pg.MerchantCode,
+	})
 	if err != nil {
-		return nil, errors.New("gagal merakit HTTP request")
+		return nil, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	statusCode, respStr := res.StatusCode, res.Body
 
-	switch pg.AuthType {
-	case "TRIPAY_HMAC":
-		sigString := fmt.Sprintf("%s%s%.0f", pg.MerchantCode, req.OrderID, req.Amount)
-		signature := crypto.GenerateHMAC256(sigString, decryptedPrivateKey)
-
-		payloadStr = strings.TrimSpace(payloadStr)
-		if strings.HasSuffix(payloadStr, "}") {
-			payloadStr = payloadStr[:len(payloadStr)-1] + fmt.Sprintf(`, "signature": "%s"}`, signature)
-		}
-		httpReq, _ = http.NewRequest("POST", targetURL, bytes.NewBuffer([]byte(payloadStr)))
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		// ---> INI BARIS YANG GUE LUPA KEMARIN BOSS <---
-		httpReq.Header.Set("Authorization", "Bearer "+decryptedServerKey)
-
-	case "IPAYMU_V2":
-		buffer := new(bytes.Buffer)
-		if err := json.Compact(buffer, []byte(payloadStr)); err == nil {
-			payloadStr = buffer.String()
-		}
-
-		bodyHasher := sha256.New()
-		bodyHasher.Write([]byte(payloadStr))
-		bodyHashStr := hex.EncodeToString(bodyHasher.Sum(nil))
-
-		stringToSign := fmt.Sprintf("POST:%s:%s:%s", pg.MerchantCode, bodyHashStr, decryptedPrivateKey)
-
-		mac := hmac.New(sha256.New, []byte(decryptedPrivateKey))
-		mac.Write([]byte(stringToSign))
-		signatureHex := hex.EncodeToString(mac.Sum(nil))
-
-		timestamp := time.Now().Format("20060102150405")
-
-		httpReq, _ = http.NewRequest("POST", targetURL, bytes.NewBuffer([]byte(payloadStr)))
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("va", pg.MerchantCode)
-		httpReq.Header.Set("signature", signatureHex)
-		httpReq.Header.Set("timestamp", timestamp)
-
-	case "BASIC_AUTH":
-		httpReq.SetBasicAuth(decryptedServerKey, "")
-	case "BEARER_TOKEN", "Bearer Auth":
-		httpReq.Header.Set("Authorization", "Bearer "+decryptedServerKey)
-	case "CUSTOM_HEADER":
-		if pg.CustomAuthHeader != "" {
-			httpReq.Header.Set(pg.CustomAuthHeader, decryptedServerKey)
-		}
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("gagal menghubungi PG: %v", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	respStr := string(respBody)
 	clientPayloadBytes, _ := json.Marshal(req)
 	clientPayload := string(clientPayloadBytes)
 
-	if resp.StatusCode >= 400 {
+	if statusCode >= 400 {
 		lowerResp := strings.ToLower(respStr)
 		if strings.Contains(lowerResp, "whitelist") || (strings.Contains(lowerResp, "ip") && strings.Contains(lowerResp, "allow")) {
-			return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): indikasi IP belum di-whitelist di Payment Gateway. Tambahkan IP server Dupay ke whitelist di dashboard PG. Detail: %s", pg.Name, resp.StatusCode, respStr)
+			return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): indikasi IP belum di-whitelist di Payment Gateway. Tambahkan IP server Dupay ke whitelist di dashboard PG. Detail: %s", pg.Name, statusCode, respStr)
 		}
-		return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): %s", pg.Name, resp.StatusCode, respStr)
+		return nil, fmt.Errorf("Ditolak oleh %s (Code: %d): %s", pg.Name, statusCode, respStr)
 	}
 
 	var responseMapping map[string]string
-	if pg.ResponseMapping != "" && pg.ResponseMapping != "{}" {
-		json.Unmarshal([]byte(pg.ResponseMapping), &responseMapping)
+	if ep.ResponseMapping != "" && ep.ResponseMapping != "{}" {
+		json.Unmarshal([]byte(ep.ResponseMapping), &responseMapping)
 	}
 
-	// Helper: support pipe-separated fallback paths.
-	// Contoh: "data.pay_code|data.qr_string|data.qr_url" -> ambil value pertama yang non-empty.
-	extract := func(paths string) string {
-		if paths == "" {
-			return ""
-		}
-		for _, p := range strings.Split(paths, "|") {
-			if v := gjson.Get(respStr, strings.TrimSpace(p)).String(); v != "" {
-				return v
-			}
-		}
-		return ""
-	}
+	extract := func(paths string) string { return extractPaths(respStr, paths) }
 
 	pgRefID := extract(responseMapping["pg_transaction_id"])
 	checkoutURL := extract(responseMapping["checkout_url"])
@@ -208,7 +139,7 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		PaymentDeeplink:  paymentDeeplink,
 		ClientPayload:    clientPayload,
 		PGResponse:       respStr,
-		PGStatusCode:     resp.StatusCode,
+		PGStatusCode:     statusCode,
 		CreatedAt:        time.Now(),
 	}
 
@@ -227,17 +158,44 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 // nggak bocor ke publik. Frontend cukup pake `code` yang dia kirim balik saat charge,
 // dan orchestrator yang terjemahin ke PGCode lewat channel_mapping.
 func (s *chargeService) GetPublicChannels(gatewayName string) ([]ChannelInfo, error) {
-	var pg models.PaymentGateway
-	q := s.db.Where("is_active = ?", true)
+	var active []ChannelInfo
 	if gatewayName != "" {
-		q = q.Where("LOWER(name) = LOWER(?)", gatewayName)
-	}
-	if err := q.First(&pg).Error; err != nil {
-		return nil, fmt.Errorf("gateway tidak ditemukan atau tidak aktif")
+		var pg models.PaymentGateway
+		if err := s.db.Where("is_active = ? AND LOWER(name) = LOWER(?)", true, gatewayName).First(&pg).Error; err != nil {
+			return nil, fmt.Errorf("gateway tidak ditemukan atau tidak aktif")
+		}
+		all, _ := ParseChannels(pg.ChannelMapping)
+		active = ActiveChannels(all)
+	} else {
+		// Tanpa gateway: gabungan semua gateway aktif. Kode yang sama diambil dari gateway yang
+		// bakal dipakai waktu charge (prioritas paling tinggi), biar fee/min/max yang tampil sesuai.
+		gateways, err := s.activeGatewaysByPriority()
+		if err != nil {
+			return nil, err
+		}
+		seen := map[string]bool{}
+		for _, pg := range gateways {
+			all, _ := ParseChannels(pg.ChannelMapping)
+			for _, ch := range ActiveChannels(all) {
+				key := strings.ToLower(strings.TrimSpace(ch.Code))
+				if key == "" || seen[key] {
+					continue
+				}
+				seen[key] = true
+				active = append(active, ch)
+			}
+		}
 	}
 
-	all, _ := ParseChannels(pg.ChannelMapping)
-	active := ActiveChannels(all)
+	// Metode bayar yang dimatiin admin nggak ditampilin ke merchant.
+	disabled := s.disabledMethods()
+	enabled := active[:0]
+	for _, ch := range active {
+		if !disabled[strings.ToLower(strings.TrimSpace(ch.Code))] {
+			enabled = append(enabled, ch)
+		}
+	}
+	active = enabled
 
 	// Sanitasi: hilangkan pg_code dari response publik.
 	out := make([]ChannelInfo, 0, len(active))
@@ -279,6 +237,7 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 		decryptedPrivateKey = key
 	}
 
+	confirmViaStatusAPI := false
 	switch pg.AuthType {
 	case "TRIPAY_HMAC":
 		expectedSignature := crypto.GenerateHMAC256(payload, decryptedPrivateKey)
@@ -286,7 +245,8 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 			return errors.New("UNAUTHORIZED: Webhook signature tidak valid")
 		}
 	case "IPAYMU_V2":
-		// Bypass verifikasi (iPaymu sering nggak ngasih signature webhook)
+		// Signature nggak cocok / nggak ada: isi callback nggak dipercaya, status ditanya langsung ke iPaymu di bawah.
+		confirmViaStatusAPI = !verifyIpaymuSignature(payload, webhookSignature, pg.MerchantCode)
 	default:
 		if pg.WebhookValidationType == "TOKEN_MATCH" && pg.WebhookSecret != "" {
 			if webhookSignature != pg.WebhookSecret {
@@ -328,31 +288,19 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 		return errors.New("gagal mengekstrak data dari payload")
 	}
 
-	internalStatus := "PENDING"
-	if successStatuses, ok := mapping["success_statuses"].([]interface{}); ok {
-		for _, st := range successStatuses {
-			if strings.EqualFold(st.(string), pgStatus) {
-				internalStatus = "SUCCESS"
-				break
-			}
+	if confirmViaStatusAPI {
+		var trx models.Transaction
+		if err := s.db.Where("order_id = ? AND payment_gateway_id = ?", orderID, pg.ID).First(&trx).Error; err != nil {
+			return errors.New("transaksi tidak ditemukan (order_id atau gateway salah)")
 		}
-	}
-	if failedStatuses, ok := mapping["failed_statuses"].([]interface{}); ok {
-		for _, st := range failedStatuses {
-			if strings.EqualFold(st.(string), pgStatus) {
-				internalStatus = "FAILED"
-				break
-			}
+		log.Printf("[WEBHOOK] signature %s nggak cocok, cek status order_id=%s langsung ke PG", pg.Name, orderID)
+		if _, _, err := s.SyncStatus(trx.ID, ""); err != nil {
+			return fmt.Errorf("UNAUTHORIZED: signature callback tidak valid dan cek status ke PG gagal: %v", err)
 		}
+		return nil
 	}
-	if refundedStatuses, ok := mapping["refunded_statuses"].([]interface{}); ok {
-		for _, st := range refundedStatuses {
-			if strings.EqualFold(st.(string), pgStatus) {
-				internalStatus = "REFUNDED"
-				break
-			}
-		}
-	}
+
+	internalStatus := mapStatus(mapping, pgStatus)
 
 	err := s.UpdateStatus(orderID, internalStatus, pg.ID)
 	if err != nil {
@@ -411,4 +359,65 @@ func (s *chargeService) forwardWebhookToMerchant(orderID string, gatewayID strin
 	}
 
 	log.Printf("[WEBHOOK-FWD] sukses kirim callback ke merchant order_id=%s status=%s", trx.OrderID, trx.Status)
+}
+
+// SyncStatus nanya status transaksi langsung ke PG lewat endpoint "status" gateway-nya,
+// buat jaga-jaga kalau webhook PG nggak nyampe. merchantID kosong = dipanggil dari CMS (boleh semua transaksi).
+// Return: transaksi terbaru + status mentah dari PG.
+func (s *chargeService) SyncStatus(id string, merchantID string) (*models.Transaction, string, error) {
+	var trx models.Transaction
+	if err := s.db.Where("id = ?", id).First(&trx).Error; err != nil {
+		return nil, "", errors.New("transaction not found")
+	}
+	if merchantID != "" && trx.MerchantID != merchantID {
+		return nil, "", errors.New("transaction not found")
+	}
+
+	var pg models.PaymentGateway
+	if err := s.db.Preload("Endpoints").Where("id = ?", trx.PaymentGatewayID).First(&pg).Error; err != nil {
+		return nil, "", errors.New("gateway transaksi ini tidak ditemukan")
+	}
+
+	methodCode, channelMethod := findChannel(&pg, trx.PaymentMethod)
+	ep := resolveEndpoint(&pg, models.EndpointActionStatus, channelMethod)
+	if ep == nil {
+		return nil, "", fmt.Errorf("gateway %s belum punya endpoint status yang aktif", pg.Name)
+	}
+
+	res, err := s.callGateway(&pg, ep, pgCallVars{
+		OrderID:       trx.OrderID,
+		Amount:        trx.Amount,
+		PaymentMethod: methodCode,
+		PGReferenceID: trx.PGReferenceID,
+		MerchantCode:  pg.MerchantCode,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	statusCode, respStr := res.StatusCode, res.Body
+	if statusCode >= 400 {
+		return nil, "", fmt.Errorf("Ditolak oleh %s (Code: %d): %s", pg.Name, statusCode, respStr)
+	}
+
+	var responseMapping map[string]string
+	json.Unmarshal([]byte(ep.ResponseMapping), &responseMapping)
+	pgStatus := extractPaths(respStr, responseMapping["status"])
+	if pgStatus == "" {
+		return nil, "", fmt.Errorf("status tidak ditemukan di response %s, cek response_mapping.status di endpoint status. Response: %s", pg.Name, respStr)
+	}
+
+	var webhookMapping map[string]interface{}
+	json.Unmarshal([]byte(pg.WebhookMapping), &webhookMapping)
+	newStatus := mapStatus(webhookMapping, pgStatus)
+
+	// PENDING = status PG belum final / nggak dikenal, jangan nimpa status yang udah ada.
+	if newStatus != "PENDING" && newStatus != trx.Status {
+		if err := s.db.Model(&models.Transaction{}).Where("id = ?", trx.ID).Update("status", newStatus).Error; err != nil {
+			return nil, "", err
+		}
+		trx.Status = newStatus
+		go s.forwardWebhookToMerchant(trx.OrderID, pg.ID)
+	}
+
+	return &trx, pgStatus, nil
 }
