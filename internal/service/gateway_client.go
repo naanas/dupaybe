@@ -227,6 +227,7 @@ func (s *chargeService) callGateway(pg *models.PaymentGateway, ep *models.Gatewa
 // mapStatus terjemahin status PG ke status internal pakai webhook_mapping
 // (success_statuses / failed_statuses / refunded_statuses). Selain itu = PENDING.
 func mapStatus(mapping map[string]interface{}, pgStatus string) string {
+	trimmed := strings.TrimSpace(pgStatus)
 	for _, rule := range []struct{ key, status string }{
 		{"success_statuses", "SUCCESS"},
 		{"failed_statuses", "FAILED"},
@@ -234,10 +235,25 @@ func mapStatus(mapping map[string]interface{}, pgStatus string) string {
 	} {
 		list, _ := mapping[rule.key].([]interface{})
 		for _, st := range list {
-			if s, ok := st.(string); ok && strings.EqualFold(s, pgStatus) {
+			s, ok := st.(string)
+			if !ok {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" && (strings.EqualFold(s, trimmed) || strings.Contains(strings.ToUpper(trimmed), strings.ToUpper(s))) {
 				return rule.status
 			}
 		}
+	}
+	// Fallback kalimat bahasa Indonesia dari endpoint /transaction/check-status Tripay
+	upper := strings.ToUpper(trimmed)
+	switch {
+	case strings.Contains(upper, "DIBAYAR") || upper == "PAID" || upper == "SETTLED" || upper == "SUCCESS":
+		return "SUCCESS"
+	case strings.Contains(upper, "REFUND"):
+		return "REFUNDED"
+	case strings.Contains(upper, "KADALUARSA") || strings.Contains(upper, "GAGAL") || upper == "EXPIRED" || upper == "FAILED":
+		return "FAILED"
 	}
 	return "PENDING"
 }

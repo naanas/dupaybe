@@ -228,7 +228,9 @@ func (s *chargeService) UpdateStatus(orderID string, status string, gatewayID st
 func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webhookSignature string) error {
 	var pg models.PaymentGateway
 	if err := s.db.Where("LOWER(name) = LOWER(?) AND is_active = ?", gatewayName, true).First(&pg).Error; err != nil {
-		return fmt.Errorf("gateway %s tidak ditemukan", gatewayName)
+		if err2 := s.db.Where("LOWER(name) LIKE LOWER(?) AND is_active = ?", strings.TrimSpace(gatewayName)+"%", true).First(&pg).Error; err2 != nil {
+			return fmt.Errorf("gateway %s tidak ditemukan", gatewayName)
+		}
 	}
 
 	decryptedPrivateKey := ""
