@@ -22,6 +22,7 @@ type ChargeRequest struct {
 	Currency      string  `json:"currency" binding:"required"`
 	PaymentMethod string  `json:"payment_method" binding:"required"`
 	GatewayName   string  `json:"gateway_name"` // opsional; kosong = Dupay yang milih gateway (lihat PaymentGateway.Priority)
+	ExpiredAt     int64   `json:"expired_at"`   // opsional; batas bayar (unix detik), diteruskan ke PG lewat {{expired_time}}
 }
 
 type Transaction struct {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"dupay/internal/config"
 	"dupay/internal/models"
 	"dupay/pkg/crypto"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,11 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 
 	var existingTrx models.Transaction
 	if err := s.db.Where("idempotency_key = ? AND merchant_id = ?", idempotencyKey, merchantID).First(&existingTrx).Error; err == nil {
+		// Key yang sama wajib isi yang sama; kalau beda, jangan diam-diam balikin transaksi lain.
+		if existingTrx.OrderID != req.OrderID || existingTrx.Amount != req.Amount ||
+			!strings.EqualFold(strings.TrimSpace(existingTrx.PaymentMethod), strings.TrimSpace(req.PaymentMethod)) {
+			return nil, ErrIdempotencyMismatch
+		}
 		return &existingTrx, nil
 	}
 
@@ -83,6 +90,7 @@ func (s *chargeService) ProcessCharge(req *models.ChargeRequest, idempotencyKey 
 		Amount:        req.Amount,
 		PaymentMethod: methodCode,
 		MerchantCode:  pg.MerchantCode,
+		ExpiredAt:     req.ExpiredAt,
 	})
 	if err != nil {
 		return nil, err
@@ -214,36 +222,115 @@ func (s *chargeService) GetTransaction(id string) (*models.Transaction, error) {
 	return &trx, nil
 }
 
-func (s *chargeService) UpdateStatus(orderID string, status string, gatewayID string) error {
-	result := s.db.Model(&models.Transaction{}).Where("order_id = ? AND payment_gateway_id = ?", orderID, gatewayID).Update("status", status)
+// ErrIdempotencyMismatch: X-Idempotency-Key sudah dipakai untuk isi charge yang berbeda.
+var ErrIdempotencyMismatch = errors.New("idempotency key sudah dipakai untuk transaksi dengan isi berbeda")
+
+// canTransition: status final nggak boleh mundur. PENDING boleh ke mana aja,
+// SUCCESS cuma boleh jadi REFUNDED, FAILED/REFUNDED final.
+func canTransition(from, to string) bool {
+	from, to = strings.ToUpper(from), strings.ToUpper(to)
+	if from == to || to == "PENDING" {
+		return false
+	}
+	switch from {
+	case "", "PENDING":
+		return true
+	case "SUCCESS":
+		return to == "REFUNDED"
+	}
+	return false
+}
+
+// UpdateStatus ganti status transaksi kalau transisinya sah. Return true kalau status berubah.
+// Update dikunci ke status lama (compare-and-set) biar dua callback barengan nggak saling timpa.
+func (s *chargeService) updateStatus(trx *models.Transaction, status string) (bool, error) {
+	if !canTransition(trx.Status, status) {
+		if !strings.EqualFold(trx.Status, status) && status != "PENDING" {
+			log.Printf("[STATUS] abaikan transisi %s -> %s untuk order_id=%s", trx.Status, status, trx.OrderID)
+		}
+		return false, nil
+	}
+	result := s.db.Model(&models.Transaction{}).Where("id = ? AND status = ?", trx.ID, trx.Status).Update("status", status)
 	if result.Error != nil {
-		return result.Error
+		return false, result.Error
 	}
 	if result.RowsAffected == 0 {
+		return false, nil // keduluan proses lain
+	}
+	trx.Status = status
+	return true, nil
+}
+
+func (s *chargeService) UpdateStatus(orderID string, status string, gatewayID string) error {
+	var trx models.Transaction
+	if err := s.db.Where("order_id = ? AND payment_gateway_id = ?", orderID, gatewayID).First(&trx).Error; err != nil {
 		return errors.New("transaksi tidak ditemukan (order_id atau gateway salah)")
 	}
-	return nil
+	_, err := s.updateStatus(&trx, status)
+	return err
+}
+
+// amountShort: true kalau PG melaporkan nominal (lewat amountPath) yang LEBIH KECIL dari nominal transaksi.
+// Path kosong / nilai nggak ketemu = nggak dicek (nggak semua PG ngirim nominal).
+func amountShort(body, amountPath string, expected float64) (bool, float64) {
+	if strings.TrimSpace(amountPath) == "" {
+		return false, 0
+	}
+	raw := extractPaths(body, amountPath)
+	if raw == "" {
+		raw = formValue(body, amountPath)
+	}
+	if raw == "" {
+		return false, 0
+	}
+	paid, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return false, 0
+	}
+	return paid+0.5 < expected, paid
+}
+
+func formValue(body, key string) string {
+	if strings.HasPrefix(strings.TrimSpace(body), "{") {
+		return ""
+	}
+	form, err := url.ParseQuery(body)
+	if err != nil {
+		return ""
+	}
+	return form.Get(strings.TrimSpace(key))
 }
 
 func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webhookSignature string) error {
 	var pg models.PaymentGateway
 	if err := s.db.Where("LOWER(name) = LOWER(?) AND is_active = ?", gatewayName, true).First(&pg).Error; err != nil {
-		if err2 := s.db.Where("LOWER(name) LIKE LOWER(?) AND is_active = ?", strings.TrimSpace(gatewayName)+"%", true).First(&pg).Error; err2 != nil {
+		// Fallback prefix (mis. /webhook/ipaymu → "IPaymusandbox"), tapi cuma kalau hasilnya tunggal.
+		var candidates []models.PaymentGateway
+		name := strings.TrimSpace(gatewayName)
+		if name == "" || strings.ContainsAny(name, "%_") {
 			return fmt.Errorf("gateway %s tidak ditemukan", gatewayName)
 		}
+		if err2 := s.db.Where("LOWER(name) LIKE LOWER(?) AND is_active = ?", name+"%", true).Limit(2).Find(&candidates).Error; err2 != nil || len(candidates) != 1 {
+			return fmt.Errorf("gateway %s tidak ditemukan", gatewayName)
+		}
+		pg = candidates[0]
 	}
 
-	decryptedPrivateKey := ""
-	if pg.PrivateKey != "" {
-		key, _ := crypto.DecryptAES([]byte(s.cfg.AppEncryptionKey), pg.PrivateKey)
-		decryptedPrivateKey = key
-	}
-
+	// Isi callback cuma dipercaya kalau signature/token-nya sah. Kalau nggak bisa diverifikasi,
+	// status TIDAK diambil dari callback tapi ditanya langsung ke PG (endpoint Cek Status).
 	confirmViaStatusAPI := false
 	switch pg.AuthType {
 	case "TRIPAY_HMAC":
+		if pg.PrivateKey == "" {
+			return errors.New("UNAUTHORIZED: private key gateway belum diisi, callback nggak bisa diverifikasi")
+		}
+		decryptedPrivateKey, err := crypto.DecryptAES([]byte(s.cfg.AppEncryptionKey), pg.PrivateKey)
+		if err != nil || decryptedPrivateKey == "" {
+			log.Printf("[WEBHOOK] gagal dekripsi private key %s: %v", pg.Name, err)
+			return errors.New("UNAUTHORIZED: private key gateway nggak bisa dibaca, cek APP_ENCRYPTION_KEY")
+		}
 		expectedSignature := crypto.GenerateHMAC256(payload, decryptedPrivateKey)
-		if !strings.EqualFold(webhookSignature, expectedSignature) {
+		if !hmac.Equal([]byte(strings.ToLower(strings.TrimSpace(webhookSignature))), []byte(expectedSignature)) {
 			return errors.New("UNAUTHORIZED: Webhook signature tidak valid")
 		}
 	case "IPAYMU_V2":
@@ -251,9 +338,12 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 		confirmViaStatusAPI = !verifyIpaymuSignature(payload, webhookSignature, pg.MerchantCode)
 	default:
 		if pg.WebhookValidationType == "TOKEN_MATCH" && pg.WebhookSecret != "" {
-			if webhookSignature != pg.WebhookSecret {
+			if !hmac.Equal([]byte(webhookSignature), []byte(pg.WebhookSecret)) {
 				return errors.New("UNAUTHORIZED: Webhook token tidak valid")
 			}
+		} else {
+			// Tanpa verifikasi callback: jangan percaya isinya, cek status langsung ke PG.
+			confirmViaStatusAPI = true
 		}
 	}
 
@@ -302,14 +392,28 @@ func (s *chargeService) ProcessWebhook(gatewayName string, payload string, webho
 		return nil
 	}
 
+	var trx models.Transaction
+	if err := s.db.Where("order_id = ? AND payment_gateway_id = ?", orderID, pg.ID).First(&trx).Error; err != nil {
+		return errors.New("transaksi tidak ditemukan (order_id atau gateway salah)")
+	}
+
 	internalStatus := mapStatus(mapping, pgStatus)
 
-	err := s.UpdateStatus(orderID, internalStatus, pg.ID)
+	if internalStatus == "SUCCESS" {
+		amountPath, _ := mapping["amount_path"].(string)
+		if short, paid := amountShort(payload, amountPath, trx.Amount); short {
+			log.Printf("[WEBHOOK] TOLAK: nominal dibayar %.0f < nominal transaksi %.0f (order_id=%s, gateway=%s)", paid, trx.Amount, orderID, pg.Name)
+			return fmt.Errorf("nominal callback (%.0f) lebih kecil dari nominal transaksi (%.0f)", paid, trx.Amount)
+		}
+	}
+
+	changed, err := s.updateStatus(&trx, internalStatus)
 	if err != nil {
 		return err
 	}
-
-	go s.forwardWebhookToMerchant(orderID, pg.ID)
+	if changed {
+		go s.forwardWebhookToMerchant(orderID, pg.ID)
+	}
 
 	return nil
 }
@@ -412,12 +516,21 @@ func (s *chargeService) SyncStatus(id string, merchantID string) (*models.Transa
 	json.Unmarshal([]byte(pg.WebhookMapping), &webhookMapping)
 	newStatus := mapStatus(webhookMapping, pgStatus)
 
-	// PENDING = status PG belum final / nggak dikenal, jangan nimpa status yang udah ada.
-	if newStatus != "PENDING" && newStatus != trx.Status {
-		if err := s.db.Model(&models.Transaction{}).Where("id = ?", trx.ID).Update("status", newStatus).Error; err != nil {
-			return nil, "", err
+	// Kalau endpoint status ngasih nominal (response_mapping.amount), pastikan nggak kurang.
+	if newStatus == "SUCCESS" {
+		if short, paid := amountShort(respStr, responseMapping["amount"], trx.Amount); short {
+			log.Printf("[SYNC] TOLAK: nominal di PG %.0f < nominal transaksi %.0f (order_id=%s)", paid, trx.Amount, trx.OrderID)
+			return nil, pgStatus, fmt.Errorf("nominal di %s (%.0f) lebih kecil dari nominal transaksi (%.0f)", pg.Name, paid, trx.Amount)
 		}
-		trx.Status = newStatus
+	}
+
+	// PENDING = status PG belum final / nggak dikenal, jangan nimpa status yang udah ada.
+	// Status final juga nggak boleh mundur (lihat canTransition).
+	changed, err := s.updateStatus(&trx, newStatus)
+	if err != nil {
+		return nil, "", err
+	}
+	if changed {
 		go s.forwardWebhookToMerchant(trx.OrderID, pg.ID)
 	}
 

@@ -12,20 +12,37 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/tidwall/gjson"
 )
 
 // pgCallVars = nilai yang bisa dipakai di path & request template endpoint lewat placeholder
-// {{order_id}}, {{amount}}, {{payment_method}}, {{pg_reference_id}}, {{merchant_code}}.
+// {{order_id}}, {{amount}}, {{payment_method}}, {{pg_reference_id}}, {{merchant_code}},
+// {{expired_time}} (unix detik) & {{expired_minutes}} (menit dari sekarang, minimal 1).
 type pgCallVars struct {
 	OrderID       string
 	Amount        float64
 	PaymentMethod string // kode PG hasil channel_mapping (mis. "BCAVA")
 	PGReferenceID string
 	MerchantCode  string
+	ExpiredAt     int64 // unix detik; 0 = default 24 jam dari sekarang
+}
+
+func (v pgCallVars) expiry() (unix int64, minutes int64) {
+	now := time.Now().Unix()
+	unix = v.ExpiredAt
+	if unix <= now {
+		unix = now + 24*60*60
+	}
+	minutes = (unix - now + 59) / 60
+	if minutes < 1 {
+		minutes = 1
+	}
+	return unix, minutes
 }
 
 // PGCallResult = request yang beneran dikirim ke PG + response-nya (dipakai juga buat fitur Test di CMS).
@@ -90,8 +107,13 @@ func findChannel(pg *models.PaymentGateway, code string) (pgCode string, method 
 // (JSON-escape buat body, URL-escape buat path). "{{amount}}" yang dikutip jadi angka JSON.
 func renderTemplate(tpl string, v pgCallVars, escape func(string) string) string {
 	amount := fmt.Sprintf("%.0f", v.Amount)
+	expUnix, expMin := v.expiry()
 	tpl = strings.ReplaceAll(tpl, "\"{{amount}}\"", amount)
+	tpl = strings.ReplaceAll(tpl, "\"{{expired_time}}\"", strconv.FormatInt(expUnix, 10))
+	tpl = strings.ReplaceAll(tpl, "\"{{expired_minutes}}\"", strconv.FormatInt(expMin, 10))
 	return strings.NewReplacer(
+		"{{expired_time}}", strconv.FormatInt(expUnix, 10),
+		"{{expired_minutes}}", strconv.FormatInt(expMin, 10),
 		"{{order_id}}", escape(v.OrderID),
 		"{{payment_method}}", escape(v.PaymentMethod),
 		"{{pg_reference_id}}", escape(v.PGReferenceID),
@@ -153,6 +175,17 @@ func (s *chargeService) callGateway(pg *models.PaymentGateway, ep *models.Gatewa
 	case "TRIPAY_HMAC":
 		// Signature Tripay (merchant_code + merchant_ref + amount) cuma dipakai pas bikin transaksi.
 		if ep.Action == models.EndpointActionCharge && strings.HasSuffix(body, "}") {
+			// Samain masa berlaku QR/VA di Tripay dengan yang diminta merchant, biar nggak ada
+			// QR yang masih bisa dibayar padahal di sisi merchant sudah kedaluwarsa.
+			if v.ExpiredAt > 0 && !gjson.Get(body, "expired_time").Exists() {
+				expUnix, _ := v.expiry()
+				inner := strings.TrimSpace(body[:len(body)-1])
+				sep := ", "
+				if strings.HasSuffix(inner, "{") {
+					sep = ""
+				}
+				body = inner + sep + fmt.Sprintf(`"expired_time": %d}`, expUnix)
+			}
 			sigString := fmt.Sprintf("%s%s%.0f", pg.MerchantCode, v.OrderID, v.Amount)
 			signature := crypto.GenerateHMAC256(sigString, decryptedPrivateKey)
 			inner := strings.TrimSpace(body[:len(body)-1])
@@ -226,34 +259,87 @@ func (s *chargeService) callGateway(pg *models.PaymentGateway, ep *models.Gatewa
 
 // mapStatus terjemahin status PG ke status internal pakai webhook_mapping
 // (success_statuses / failed_statuses / refunded_statuses). Selain itu = PENDING.
+//
+// Pencocokan per KATA UTUH, bukan substring: "UNPAID" nggak boleh kebaca "PAID", dan
+// "Status transaksi saat ini UNPAID" (message check-status Tripay) tetap PENDING.
+// Kalimat yang mengandung penyangkalan (BELUM/TIDAK/UNPAID/NOT) nggak pernah dianggap SUCCESS.
 func mapStatus(mapping map[string]interface{}, pgStatus string) string {
-	trimmed := strings.TrimSpace(pgStatus)
+	tokens := statusTokens(pgStatus)
+	if len(tokens) == 0 {
+		return "PENDING"
+	}
+	negated := hasAnyToken(tokens, "BELUM", "TIDAK", "UNPAID", "NOT", "NOT_PAID", "UNSETTLED")
 	for _, rule := range []struct{ key, status string }{
 		{"success_statuses", "SUCCESS"},
 		{"failed_statuses", "FAILED"},
 		{"refunded_statuses", "REFUNDED"},
 	} {
+		if rule.status == "SUCCESS" && negated {
+			continue
+		}
 		list, _ := mapping[rule.key].([]interface{})
 		for _, st := range list {
-			s, ok := st.(string)
-			if !ok {
+			var s string
+			switch v := st.(type) {
+			case string:
+				s = v
+			case float64:
+				s = strconv.FormatFloat(v, 'f', -1, 64)
+			default:
 				continue
 			}
-			s = strings.TrimSpace(s)
-			if s != "" && (strings.EqualFold(s, trimmed) || strings.Contains(strings.ToUpper(trimmed), strings.ToUpper(s))) {
+			if containsPhrase(tokens, statusTokens(s)) {
 				return rule.status
 			}
 		}
 	}
-	// Fallback kalimat bahasa Indonesia dari endpoint /transaction/check-status Tripay
-	upper := strings.ToUpper(trimmed)
+	// Fallback kalau mapping belum diisi (termasuk kalimat bahasa Indonesia).
 	switch {
-	case strings.Contains(upper, "DIBAYAR") || upper == "PAID" || upper == "SETTLED" || upper == "SUCCESS":
+	case !negated && (hasAnyToken(tokens, "PAID", "SETTLED", "SETTLEMENT", "SUCCESS", "BERHASIL") ||
+		containsPhrase(tokens, []string{"SUDAH", "DIBAYAR"})):
 		return "SUCCESS"
-	case strings.Contains(upper, "REFUND"):
+	case hasAnyToken(tokens, "REFUND", "REFUNDED"):
 		return "REFUNDED"
-	case strings.Contains(upper, "KADALUARSA") || strings.Contains(upper, "GAGAL") || upper == "EXPIRED" || upper == "FAILED":
+	case hasAnyToken(tokens, "KADALUARSA", "KEDALUWARSA", "GAGAL", "EXPIRED", "FAILED", "DIBATALKAN", "CANCELLED", "CANCELED"):
 		return "FAILED"
 	}
 	return "PENDING"
+}
+
+// statusTokens memecah status/kalimat jadi kata huruf besar. "-" & "_" bagian dari kata (kode iPaymu "-2").
+func statusTokens(s string) []string {
+	return strings.FieldsFunc(strings.ToUpper(strings.TrimSpace(s)), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_'
+	})
+}
+
+func hasAnyToken(tokens []string, want ...string) bool {
+	for _, t := range tokens {
+		for _, w := range want {
+			if t == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// containsPhrase: phrase muncul berurutan sebagai kata utuh di tokens.
+func containsPhrase(tokens, phrase []string) bool {
+	if len(phrase) == 0 || len(phrase) > len(tokens) {
+		return false
+	}
+	for i := 0; i+len(phrase) <= len(tokens); i++ {
+		match := true
+		for j, w := range phrase {
+			if tokens[i+j] != w {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }

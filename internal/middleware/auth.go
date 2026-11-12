@@ -6,11 +6,27 @@ import (
 	"dupay/pkg/crypto"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+const maxClockSkew = 5 * time.Minute
+
+func freshTimestamp(ts string, now time.Time) bool {
+	n, err := strconv.ParseInt(strings.TrimSpace(ts), 10, 64)
+	if err != nil || n <= 0 {
+		return false
+	}
+	if n > 1e12 { // milidetik
+		n /= 1000
+	}
+	d := now.Sub(time.Unix(n, 0))
+	return d <= maxClockSkew && d >= -maxClockSkew
+}
 
 func APISecurityMiddleware(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -20,6 +36,12 @@ func APISecurityMiddleware(db *gorm.DB) gin.HandlerFunc {
 
 		if apiKey == "" || signature == "" || timestamp == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing security headers"})
+			return
+		}
+
+		// Tolak request lama (anti-replay): X-Timestamp = unix detik (atau milidetik), toleransi ±5 menit.
+		if !freshTimestamp(timestamp, time.Now()) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "X-Timestamp kedaluwarsa atau tidak valid (maks selisih 5 menit dari waktu server)"})
 			return
 		}
 
@@ -55,7 +77,7 @@ func APISecurityMiddleware(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		// Baca body
-		bodyBytes, _ := io.ReadAll(c.Request.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 		// 3. Verifikasi Digital Signature HMAC

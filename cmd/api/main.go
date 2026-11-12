@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
 	"dupay/internal/config"
 	"dupay/internal/delivery/http"
 	"dupay/internal/middleware" // TAMBAHAN
 	"dupay/internal/models"
 	"dupay/internal/repository"
 	"dupay/internal/service" // TAMBAHAN
+	"encoding/hex"
 	"log"
 	"os"
 	"strings"
@@ -47,6 +49,13 @@ func main() {
 
 	// 5. Setup Gin Router
 	r := gin.Default()
+
+	// IP klien buat whitelist: X-Forwarded-For cuma dipercaya dari proxy yang dikenal
+	// (loopback, link-local Cloud Run, Google Front End). Default Gin percaya semua proxy,
+	// jadi header XFF bisa dipalsukan buat lolos whitelist. Override lewat TRUSTED_PROXIES (CIDR, koma).
+	if err := r.SetTrustedProxies(getTrustedProxies()); err != nil {
+		log.Fatalf("TRUSTED_PROXIES tidak valid: %v", err)
+	}
 
 	// 6. KONFIGURASI CORS
 	corsConfig := cors.DefaultConfig()
@@ -207,17 +216,43 @@ func getAllowedOrigins() []string {
 	return origins
 }
 
-// Fungsi helper untuk membuat admin default
+func getTrustedProxies() []string {
+	if v := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); v != "" {
+		var out []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	return []string{"127.0.0.0/8", "::1/128", "169.254.0.0/16", "35.191.0.0/16", "130.211.0.0/22"}
+}
+
+// Fungsi helper untuk membuat admin default (cuma kalau tabel users masih kosong).
+// Password diambil dari DUPAY_ADMIN_PASSWORD; kalau kosong dibikin acak & dicetak sekali ke log.
 func seedAdmin(db *gorm.DB) {
 	var count int64
 	db.Model(&models.User{}).Count(&count)
 	if count == 0 {
-		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("dupay123"), bcrypt.DefaultCost)
+		password := os.Getenv("DUPAY_ADMIN_PASSWORD")
+		if len(password) < 12 {
+			buf := make([]byte, 12)
+			if _, err := rand.Read(buf); err != nil {
+				log.Fatalf("gagal bikin password admin: %v", err)
+			}
+			password = hex.EncodeToString(buf)
+		}
+		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		db.Create(&models.User{
 			Username: "admin",
 			Password: string(hashedPassword),
 			Role:     models.RoleAdmin,
 		})
-		log.Println("🔑 Default Admin created! (Username: admin, Password: dupay123)")
+		if os.Getenv("DUPAY_ADMIN_PASSWORD") == password {
+			log.Println("🔑 Default Admin created (username: admin, password dari DUPAY_ADMIN_PASSWORD)")
+		} else {
+			log.Printf("🔑 Default Admin created! (username: admin, password: %s) — segera ganti setelah login", password)
+		}
 	}
 }

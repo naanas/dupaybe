@@ -3,6 +3,7 @@ package http
 import (
 	"dupay/internal/models"
 	"dupay/internal/service"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -32,7 +33,11 @@ func (h *ChargeHandler) CreateCharge(c *gin.Context) {
 
 	trx, err := h.service.ProcessCharge(&req, idempotencyKey, merchantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		code := http.StatusInternalServerError
+		if errors.Is(err, service.ErrIdempotencyMismatch) {
+			code = http.StatusConflict
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
 		return
 	}
 
